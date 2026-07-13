@@ -1,9 +1,9 @@
 package plugin
 
 // tokenHelperHTML is a self-contained Freebuff/Codebuff CLI login helper page.
-// Served under CPA /v0/resource/plugins/freebuff/ (management resource).
-// It talks to management routes under /v0/management/plugins/freebuff/...
-// which require the management API key (browser can use stored key when same-origin).
+// Served under CPA /v0/resource/plugins/freebuff/ (unauthenticated resource).
+// Login/verify use sibling resource API paths (/api/start|poll|verify) so the
+// browser never needs a management key (CPA /v0/management/* requires one).
 const tokenHelperHTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -85,22 +85,39 @@ let mode = 'freebuff';
 let currentToken = '';
 let pollTimer = null;
 
-// Resource pages may read management key from same-origin localStorage (CPA UI).
-function mgmtHeaders() {
-  const h = { 'Content-Type': 'application/json' };
-  try {
-    const key = localStorage.getItem('managementKey')
-      || localStorage.getItem('management-key')
-      || localStorage.getItem('cpa-management-key')
-      || '';
-    if (key) h['Authorization'] = 'Bearer ' + key;
-  } catch (_) {}
-  return h;
+// Unauthenticated resource API (same origin as this page). No management key.
+function resourceBase() {
+  // Page is typically /v0/resource/plugins/freebuff/ or .../token
+  let path = location.pathname.replace(/\/+$/, '');
+  if (path.endsWith('/token') || path.endsWith('/index.html')) {
+    path = path.replace(/\/(token|index\.html)$/, '');
+  }
+  if (!path.includes('/v0/resource/plugins/freebuff')) {
+    path = '/v0/resource/plugins/freebuff';
+  }
+  return path;
 }
 
-function mgmtBase() {
-  // Prefer absolute management path used by CPA host.
-  return '/v0/management/plugins/freebuff';
+async function apiGet(path, params) {
+  const u = new URL(resourceBase() + path, location.origin);
+  if (params) {
+    Object.keys(params).forEach(k => {
+      if (params[k] != null && params[k] !== '') u.searchParams.set(k, params[k]);
+    });
+  }
+  const resp = await fetch(u.toString(), { method: 'GET', cache: 'no-store' });
+  const text = await resp.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) {
+    throw new Error(resp.ok ? 'invalid JSON' : (text.slice(0, 200) || ('HTTP ' + resp.status)));
+  }
+  // Host may wrap body; prefer top-level fields we emit.
+  if (data && data.error && !data.login_url && !data.status && data.ok === undefined) {
+    throw new Error(data.error);
+  }
+  if (!resp.ok && data && data.error) throw new Error(data.error);
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  return data;
 }
 
 document.querySelectorAll('#modes button').forEach(btn => {
@@ -126,13 +143,9 @@ $('startBtn').onclick = async () => {
   setStatus('请求登录码…');
   $('startBtn').disabled = true;
   try {
-    const resp = await fetch(mgmtBase() + '/login/start', {
-      method: 'POST',
-      headers: mgmtHeaders(),
-      body: JSON.stringify({ mode }),
-    });
-    const data = await resp.json();
-    if (!resp.ok || data.error) throw new Error(data.error || data.message || ('HTTP ' + resp.status));
+    const data = await apiGet('/api/start', { mode });
+    if (data.error) throw new Error(data.error);
+    if (!data.login_url || !data.state) throw new Error('start response missing login_url/state');
     $('loginLink').href = data.login_url;
     show('loginArea', true);
     setStatus('等待浏览器登录…');
@@ -141,12 +154,7 @@ $('startBtn').onclick = async () => {
     pollTimer = setInterval(async () => {
       attempt++;
       try {
-        const pr = await fetch(mgmtBase() + '/login/poll', {
-          method: 'POST',
-          headers: mgmtHeaders(),
-          body: JSON.stringify({ state }),
-        });
-        const pd = await pr.json();
+        const pd = await apiGet('/api/poll', { state });
         if (pd.status === 'pending') {
           setStatus('等待登录… 第 ' + attempt + ' 次');
           return;
@@ -178,12 +186,7 @@ $('startBtn').onclick = async () => {
 };
 
 async function verify(token) {
-  const resp = await fetch(mgmtBase() + '/login/verify', {
-    method: 'POST',
-    headers: mgmtHeaders(),
-    body: JSON.stringify({ token }),
-  });
-  return resp.json();
+  return apiGet('/api/verify', { token });
 }
 
 $('verifyBtn').onclick = async () => {

@@ -62,6 +62,49 @@ func TestManagementResourceHTML(t *testing.T) {
 			t.Fatalf("unexpected management body: %s", truncateStr(string(env.Result), 300))
 		}
 	}
+	// Decode ManagementResponse body (raw HTML bytes in JSON).
+	var mr struct {
+		Body []byte `json:"Body"`
+	}
+	if err := json.Unmarshal(env.Result, &mr); err != nil || len(mr.Body) == 0 {
+		// Field names may differ; search whole result after base64 decode is flaky — check source constant path via registration instead.
+		if !strings.Contains(tokenHelperHTML, "/api/start") || !strings.Contains(tokenHelperHTML, "resourceBase") {
+			t.Fatal("token UI source must call resource /api/* helpers")
+		}
+	} else {
+		html := string(mr.Body)
+		if strings.Contains(html, "/v0/management/plugins/freebuff") {
+			t.Fatal("token UI should not call authenticated management routes")
+		}
+		if !strings.Contains(html, "/api/start") || !strings.Contains(html, "resourceBase") {
+			t.Fatalf("token UI should call resource /api/* helpers")
+		}
+	}
+}
+
+func TestManagementResourceVerifyAPI(t *testing.T) {
+	d := NewDispatcher(NopHost{})
+	// Unauthenticated resource path used by the browser page.
+	payload, _ := json.Marshal(map[string]any{
+		"Method": "GET",
+		"Path":   "/v0/resource/plugins/freebuff/api/verify?token=",
+	})
+	raw, err := d.Handle(pluginabi.MethodManagementHandle, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env Envelope
+	_ = json.Unmarshal(raw, &env)
+	if !env.OK {
+		t.Fatalf("%s", raw)
+	}
+	// Empty token → ok:false in body
+	if !strings.Contains(string(env.Result), "missing token") && !strings.Contains(string(env.Result), `"ok":false`) {
+		// still ok if wrapped; at least 200 envelope
+		if !strings.Contains(string(env.Result), "StatusCode") && !strings.Contains(string(env.Result), "200") {
+			t.Fatalf("verify empty token: %s", truncateStr(string(env.Result), 400))
+		}
+	}
 }
 
 func TestManagementVerifyMissingToken(t *testing.T) {

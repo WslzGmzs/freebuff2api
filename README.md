@@ -109,21 +109,22 @@ git push origin v0.1.0
 2. 插件走 CLI device-code：`auth.login.start` → 打开浏览器 URL → `auth.login.poll` 直到成功。  
 3. 成功后 token 写入 `freebuff.json`（含校验 `/api/v1/freebuff/session`）。
 
-也可打开管理资源页（需 management key，同域 UI 可读本地 key）：
+也可打开 **资源页**（**不需要** management key）：
 
 ```text
 /v0/resource/plugins/freebuff/
 ```
 
-页面支持 Freebuff / Codebuff 平台切换、扫码、验证 token、复制 `freebuff.json`。
-
-管理 API（需 management key）：
+页面支持 Freebuff / Codebuff 平台切换、扫码、验证 token、复制 `freebuff.json`。  
+登录接口走同路径下的 resource API（同样免 management key）：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/v0/management/plugins/freebuff/login/start` | body: `{"mode":"freebuff"|"codebuff"}` |
-| `POST` | `/v0/management/plugins/freebuff/login/poll` | body: `{"state":"<fingerprint_id>"}` |
-| `POST` | `/v0/management/plugins/freebuff/login/verify` | body: `{"token":"..."}` |
+| `GET` | `/v0/resource/plugins/freebuff/api/start?mode=freebuff` | 开始 CLI 登录 |
+| `GET` | `/v0/resource/plugins/freebuff/api/poll?state=...` | 轮询登录结果 |
+| `GET` | `/v0/resource/plugins/freebuff/api/verify?token=...` | 校验 token |
+
+（可选）`/v0/management/plugins/freebuff/...` 的 POST 路由仍保留，给已带 management key 的工具用。
 
 ### B. 手动写入 freebuff.json
 
