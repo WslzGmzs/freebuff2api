@@ -1,18 +1,21 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
-# Local configuration
+# Local secrets
 .env
+auth/freebuff.json
 
+# Go / CPA plugin build artifacts
+*.dll
+*.so
+*.dylib
+*.h
+/dist/
+*.test
+*.exe
+/freebuff.h
+*.zip
+*.sha256
 
-# Server runtime logs (written by background python main.py launches)
-server.log
-server.err.log
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

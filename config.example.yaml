@@ -1,0 +1,20 @@
+# CLIProxyAPI config fragment for the freebuff plugin.
+# Merge into your CPA config.yaml.
+
+plugins:
+  enabled: true
+  dir: "plugins"
+  configs:
+    freebuff:
+      enabled: true
+      priority: 100
+      # Default CLI login host for auth.login.start: freebuff | codebuff
+      login_mode: freebuff
+      debug: false
+
+# CPA frontend API keys (clients call CPA, not Freebuff directly)
+api-keys:
+  - "sk-local"
+
+# Credentials: add via CPA panel (scan login) or place freebuff.json in the
+# auth directory — see auth/freebuff.example.json.

@@ -1,0 +1,9 @@
+{
+  "token": "YOUR_FREEBUFF_BEARER_TOKEN",
+  "ad_providers": ["gravity", "zeroclick"],
+  "api_base_url": "https://www.codebuff.com",
+  "timezone": "Asia/Shanghai",
+  "locale": "zh-CN",
+  "os": "windows",
+  "debug": false
+}
