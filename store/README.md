@@ -1,72 +1,75 @@
-# CLIProxyAPI Plugins Store entry
+# CLIProxyAPI Plugins Store metadata
 
-This directory holds the metadata used to list **freebuff** in the official
-[CLIProxyAPI-Plugins-Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store).
+Spec: [CLIProxyAPI-Plugins-Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store)
 
-The store **only** hosts `registry.json`. Binaries, checksums, and release notes
-live in **this** repository's GitHub Releases.
+The official store **only** hosts a root `registry.json`. Plugin binaries and
+`checksums.txt` are published from **this** repository’s GitHub Releases.
 
-## Registry entry
+## Files in this directory
 
-See [`registry-entry.json`](./registry-entry.json). Required fields:
+| File | Role |
+|------|------|
+| **`registry.json`** | Full store document shape (`schema_version` + `plugins[]`). Use for local validation / private store mirrors. |
+| **`registry-entry.json`** | Single plugin object only. When opening a PR to the official store, **append this object** into their `plugins` array (do not replace their whole file with this object alone). |
 
-| Field | Value |
-|-------|--------|
-| `id` | `freebuff` (must match library filename without extension) |
-| `name` | Freebuff |
-| `description` | short capability summary |
-| `author` | WslzGmzs |
-| `repository` | `https://github.com/WslzGmzs/freebuff2api` (exact form) |
+## Official `registry.json` shape (required)
 
-Optional: `version` (display fallback), `logo`, `homepage`, `license`, `tags`.
+```json
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "freebuff",
+      "name": "Freebuff",
+      "description": "...",
+      "author": "WslzGmzs",
+      "repository": "https://github.com/WslzGmzs/freebuff2api",
+      "homepage": "https://github.com/WslzGmzs/freebuff2api",
+      "license": "AGPL-3.0",
+      "version": "0.1.0",
+      "tags": ["Provider", "Freebuff", "Codebuff", "Management"]
+    }
+  ]
+}
+```
 
-`version` must **not** start with `v`. Release tags **must** be `vX.Y.Z`.
+### Required fields (per plugin)
 
-## Release assets (this repo)
+- `id` — plugin ID; must match library basename (`freebuff`)
+- `name`
+- `description`
+- `author`
+- `repository` — exactly `https://github.com/{owner}/{repo}` (no `.git`, no trailing slash)
 
-Produced by `.github/workflows/build.yml` on tag `v*`:
+### Optional
+
+- `version` — display fallback only; **must not** start with `v` (use `0.1.0`, not `v0.1.0`)
+- `logo`, `homepage`, `license`, `tags`
+
+### Validation rules (store)
+
+- `schema_version` must be `1`
+- `id`: `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`
+- `id` unique across the registry
+- `repository` exact GitHub HTTPS form above
+
+## Release assets (this repo, not in store)
+
+Tag: `vX.Y.Z` (e.g. `v0.1.0`). Version in asset names = tag without `v`.
 
 ```text
-freebuff_<version>_darwin_amd64.zip
-freebuff_<version>_darwin_arm64.zip
-freebuff_<version>_linux_amd64.zip
-freebuff_<version>_linux_arm64.zip
-freebuff_<version>_windows_amd64.zip
-freebuff_<version>_windows_arm64.zip
-freebuff_<version>_freebsd_amd64.zip
+freebuff_0.1.0_linux_amd64.zip
+...
 checksums.txt
 ```
 
-Each zip contains **only** the dynamic library at the zip root:
-
-- Darwin: `freebuff.dylib`
-- Linux / FreeBSD: `freebuff.so`
-- Windows: `freebuff.dll`
-
-`checksums.txt` uses sha256sum lines:
-
-```text
-<sha256>  freebuff_0.1.0_linux_amd64.zip
-```
-
-## Publish a version
-
-```bash
-# ensure plugin.PluginVer / docs match
-git tag v0.1.0
-git push origin v0.1.0
-# CI builds all platforms and creates/updates the GitHub Release
-```
+Each zip: library **at zip root only** — `freebuff.so` / `freebuff.dylib` / `freebuff.dll`.
 
 ## Add to official store
 
-1. Ship at least one valid `v*` release with zips + `checksums.txt`.
-2. Fork [CLIProxyAPI-Plugins-Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store).
-3. Append the object from `registry-entry.json` to the `plugins` array in `registry.json`.
-4. Open a PR that **only** changes `registry.json` (unless docs need updates), and include:
-   - repository URL
-   - latest release tag (`v0.1.0`)
-   - evidence that zip assets + `checksums.txt` exist
-   - short capability description
+1. Publish a valid `v*` GitHub Release (zips + `checksums.txt`).
+2. Fork the store repo; edit **only** `registry.json`.
+3. Append the object from `registry-entry.json` into `plugins` (keep existing plugins).
+4. PR with: repo URL, latest tag, proof assets exist, short capability note.
 
-Updates: publish a new `v*` release only; **no** registry change required for version bumps.
+Version bumps later: new release tag only; registry change optional.
