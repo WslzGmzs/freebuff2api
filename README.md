@@ -6,11 +6,12 @@
 
 ## 能力
 
-| CPA capability | 作用 |
-|---|---|
-| `model_provider` | Freebuff 模型（简写、Gemini→MiMo 别名） |
-| `auth_provider` | `freebuff.json` 标准凭据 + **CPA `/oauth` 登录**（Freebuff OAuth / Codebuff OAuth） |
-| `executor` | Session / 广告 / agent-run / 上游 SSE → chat-completions |
+| 动态库 | `auth.identifier` | `/oauth` 显示 | 其它 |
+|--------|-------------------|---------------|------|
+| **`freebuff.*`** | `freebuff` | **Freebuff OAuth** | 模型 + chat executor |
+| **`codebuff.*`** | `codebuff` | **Codebuff OAuth** | 仅登录；凭据仍走 freebuff executor |
+
+CPA 每个插件库只能注册 **一个** auth provider，因此 Codebuff OAuth 必须作为第二个库安装（同源代码，`-X plugin.Identity=codebuff`）。
 
 Anthropic 等协议由 **CPA 主机** 译成 chat-completions 后再进 executor。
 
@@ -24,9 +25,13 @@ Anthropic 等协议由 **CPA 主机** 译成 chat-completions 后再进 executor
 
 ```bash
 go test ./...
-CGO_ENABLED=1 go build -buildmode=c-shared -o freebuff.dll .   # Windows: .dll / Linux: .so / macOS: .dylib
-make plugin
-make package VERSION=0.1.0
+
+# 两个库（推荐）：Freebuff OAuth + Codebuff OAuth
+make plugins          # dist/freebuff.<ext> + dist/codebuff.<ext>
+make package-all VERSION=0.1.0
+
+# 仅 Freebuff
+make freebuff-plugin
 ```
 
 ## 发布 / 插件商店
@@ -41,32 +46,39 @@ git tag v0.1.0 && git push origin v0.1.0
 
 ## 安装
 
-1. 放入 `plugins/<goos>/<goarch>/freebuff.<ext>` 或 `plugins/freebuff.<ext>`
-2. 配置：
+1. 将 **两个** 库放入 CPA 插件目录（平台子目录或扁平均可）：
+
+   ```text
+   plugins/windows/amd64/freebuff.dll
+   plugins/windows/amd64/codebuff.dll
+   # Linux: .so   macOS: .dylib
+   ```
+
+2. 配置（见 `config.example.yaml`）：
 
 ```yaml
 plugins:
   enabled: true
   dir: "plugins"
   configs:
-    freebuff:
-      enabled: true
-      priority: 100
-      # login_mode: freebuff   # 默认 Freebuff OAuth；codebuff = Codebuff OAuth
+    freebuff: { enabled: true, priority: 100 }
+    codebuff: { enabled: true, priority: 99 }
 ```
 
-3. 重启 CPA，确认 `plugin loaded ... plugin_id=freebuff`。
+3. 重启 CPA，日志中应有 `plugin_id=freebuff` 与 `plugin_id=codebuff`。
 
 ## 登录（CPA `/oauth`）
 
-在 CPA 管理界面 **OAuth / 添加凭据** 中选择本插件：
+CPA 根据各库的 `auth.identifier` 暴露 OAuth 入口（对应  
+`GET /v0/management/freebuff-auth-url` / `codebuff-auth-url`）：
 
-| 显示名 | 说明 |
-|--------|------|
-| **Freebuff OAuth** | 默认；`freebuff.com` CLI device-code |
-| **Codebuff OAuth** | `login_mode: codebuff` 或启动 metadata `mode=codebuff`；`codebuff.com` |
+| `/oauth` 项 | 插件库 | 上游登录 |
+|-------------|--------|----------|
+| **Freebuff OAuth** | `freebuff.*` | freebuff.com CLI device-code |
+| **Codebuff OAuth** | `codebuff.*` | codebuff.com CLI device-code |
 
-流程：`auth.login.start` → 浏览器完成登录 → `auth.login.poll` → 校验 session API → 写入标准 `freebuff.json`。
+流程：`auth.login.start` → 浏览器登录 → `auth.login.poll` → 校验 session → 写入凭据。  
+登录成功后 `AuthData.Provider` 为 **`freebuff`**，聊天仍由 freebuff executor 执行。
 
 也可手动粘贴 token（见下）。
 

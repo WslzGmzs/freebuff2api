@@ -2,9 +2,16 @@
 
 ## Purpose
 
-Native **CLIProxyAPI** plugin: Freebuff free models via `model_provider` + `auth_provider` (CPA **`/oauth`**: Freebuff OAuth / Codebuff OAuth) + `executor` (chat-completions).
+Native **CLIProxyAPI** dual plugins from one tree:
 
-**No** `management_api` / plugin-pages Token UI — login is only through CPA OAuth (`auth.login.*`).
+| Binary | Identity (`-X plugin.Identity=…`) | auth.identifier | Role |
+|--------|-------------------------------------|-----------------|------|
+| `freebuff.*` | `freebuff` (default) | `freebuff` | models + executor + Freebuff OAuth |
+| `codebuff.*` | `codebuff` | `codebuff` | Codebuff OAuth only |
+
+CPA lists **one OAuth entry per identifier**; both libraries must be installed for both Freebuff OAuth and Codebuff OAuth on `/oauth`.
+
+Login is only via CPA OAuth (`auth.login.*`). No management Token UI.
 
 ## Layout
 
@@ -26,20 +33,25 @@ Native **CLIProxyAPI** plugin: Freebuff free models via `model_provider` + `auth
 
 ```bash
 go test ./...
-make plugin
-make package VERSION=0.1.0
+make plugins                 # freebuff.* + codebuff.*
+make package-all VERSION=0.1.0
 ```
 
-Version: `-X github.com/WslzGmzs/freebuff2api/plugin.PluginVer=X.Y.Z`
+Link flags:
+
+```text
+-X github.com/WslzGmzs/freebuff2api/plugin.PluginVer=X.Y.Z
+-X github.com/WslzGmzs/freebuff2api/plugin.Identity=freebuff|codebuff
+```
 
 ## OAuth (`auth.login.*`)
 
-| Mode | Host | UI label |
-|------|------|----------|
-| `freebuff` (default) | freebuff.com | **Freebuff OAuth** |
-| `codebuff` | codebuff.com | **Codebuff OAuth** |
+| Library | auth.identifier | Host | UI label |
+|---------|-----------------|------|----------|
+| freebuff.* | freebuff | freebuff.com | Freebuff OAuth |
+| codebuff.* | codebuff | codebuff.com | Codebuff OAuth |
 
-Select via `plugins.configs.freebuff.login_mode` or start metadata `mode` / name containing `codebuff`.
+Poll success always sets `AuthData.Provider=freebuff` so the freebuff executor handles chat.
 
 ## Credential rules
 

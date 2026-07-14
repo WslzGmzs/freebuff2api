@@ -16,14 +16,81 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+// Identity selects which CPA auth-provider face this binary exposes.
+//
+// CPA maps one dynamic library → one auth.identifier, so Freebuff OAuth and
+// Codebuff OAuth must be two libraries (freebuff.* and codebuff.*). Both share
+// this package; build with:
+//
+//	// Freebuff (default): models + executor + Freebuff OAuth
+//	go build -buildmode=c-shared -o freebuff.so .
+//
+//	// Codebuff: Codebuff OAuth only (credentials still execute via freebuff)
+//	go build -buildmode=c-shared -ldflags "-X github.com/WslzGmzs/freebuff2api/plugin.Identity=codebuff" -o codebuff.so .
 const (
-	ProviderName = "freebuff"
-	AuthFileName = "freebuff.json"
+	IdentityFreebuff = "freebuff"
+	IdentityCodebuff = "codebuff"
+
+	// RuntimeProvider is the executor/model provider key used in AuthData so
+	// Codebuff OAuth credentials still route chat to the freebuff executor.
+	RuntimeProvider = "freebuff"
+	AuthFileName    = "freebuff.json"
 )
 
 // PluginVer is the plugin release version (no leading "v").
 // Overridden at link time: -X github.com/WslzGmzs/freebuff2api/plugin.PluginVer=x.y.z
 var PluginVer = "0.1.0"
+
+// Identity is freebuff (default) or codebuff. Set via -X at link time.
+var Identity = IdentityFreebuff
+
+// ProviderName is the CPA auth.identifier for this binary (and legacy alias).
+// Prefer AuthIdentifier() for new code.
+var ProviderName = IdentityFreebuff
+
+func init() {
+	// Keep ProviderName in sync when Identity is injected via ldflags before init.
+	ProviderName = AuthIdentifier()
+}
+
+// AuthIdentifier is the CPA auth.identifier / /v0/management/<id>-auth-url key.
+func AuthIdentifier() string {
+	switch strings.ToLower(strings.TrimSpace(Identity)) {
+	case IdentityCodebuff:
+		return IdentityCodebuff
+	default:
+		return IdentityFreebuff
+	}
+}
+
+// IsCodebuffIdentity reports whether this binary is the Codebuff OAuth face.
+func IsCodebuffIdentity() bool {
+	return AuthIdentifier() == IdentityCodebuff
+}
+
+// DefaultLoginMode is the CLI login host for this binary's OAuth entry.
+func DefaultLoginMode() freebuff.LoginMode {
+	if IsCodebuffIdentity() {
+		return freebuff.LoginModeCodebuff
+	}
+	return freebuff.LoginModeFreebuff
+}
+
+// OAuthDisplayName is the human-readable OAuth entry (CPA /oauth list label).
+func OAuthDisplayName() string {
+	if IsCodebuffIdentity() {
+		return "Codebuff OAuth"
+	}
+	return "Freebuff OAuth"
+}
+
+// PluginDisplayName is metadata.Name for the library.
+func PluginDisplayName() string {
+	if IsCodebuffIdentity() {
+		return "Codebuff"
+	}
+	return "Freebuff"
+}
 
 // Host is the subset of host callbacks the executor needs.
 type Host interface {
@@ -68,15 +135,23 @@ func NewDispatcher(host Host) *Dispatcher {
 
 // Handle dispatches one CPA RPC method and returns a JSON envelope.
 func (d *Dispatcher) Handle(method string, request []byte) ([]byte, error) {
+	id := AuthIdentifier()
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
 		return OkEnvelope(d.Registration())
 	case pluginabi.MethodModelStatic, pluginabi.MethodModelForAuth:
-		return OkEnvelope(pluginapi.ModelResponse{Provider: ProviderName, Models: d.Models()})
+		if IsCodebuffIdentity() {
+			// Codebuff face is auth-only; avoid duplicate model registration.
+			return OkEnvelope(pluginapi.ModelResponse{Provider: RuntimeProvider, Models: nil})
+		}
+		return OkEnvelope(pluginapi.ModelResponse{Provider: RuntimeProvider, Models: d.Models()})
 	case pluginabi.MethodModelRegister:
-		return OkEnvelope(pluginapi.ModelRegistrationResponse{Provider: ProviderName, Models: d.Models()})
+		if IsCodebuffIdentity() {
+			return OkEnvelope(pluginapi.ModelRegistrationResponse{Provider: RuntimeProvider, Models: nil})
+		}
+		return OkEnvelope(pluginapi.ModelRegistrationResponse{Provider: RuntimeProvider, Models: d.Models()})
 	case pluginabi.MethodAuthIdentifier:
-		return OkEnvelope(IdentifierResponse{Identifier: ProviderName})
+		return OkEnvelope(IdentifierResponse{Identifier: id})
 	case pluginabi.MethodAuthParse:
 		return d.HandleParseAuth(request)
 	case pluginabi.MethodAuthLoginStart:
@@ -86,10 +161,17 @@ func (d *Dispatcher) Handle(method string, request []byte) ([]byte, error) {
 	case pluginabi.MethodAuthRefresh:
 		return d.HandleRefreshAuth(request)
 	case pluginabi.MethodExecutorIdentifier:
-		return OkEnvelope(IdentifierResponse{Identifier: ProviderName})
+		// Executor always owns the freebuff runtime provider id.
+		return OkEnvelope(IdentifierResponse{Identifier: RuntimeProvider})
 	case pluginabi.MethodExecutorExecute:
+		if IsCodebuffIdentity() {
+			return nil, fmt.Errorf("codebuff plugin is auth-only; install freebuff.* for chat execution")
+		}
 		return d.HandleExecExecute(request)
 	case pluginabi.MethodExecutorExecuteStream:
+		if IsCodebuffIdentity() {
+			return nil, fmt.Errorf("codebuff plugin is auth-only; install freebuff.* for chat execution")
+		}
 		return d.HandleExecStream(request)
 	default:
 		return ErrorEnvelope("unknown_method", "unknown method: "+method), nil
@@ -140,36 +222,43 @@ type ExecutorStreamRequest struct {
 }
 
 func (d *Dispatcher) Registration() Registration {
+	// Freebuff library: models + executor + Freebuff OAuth.
+	// Codebuff library: Codebuff OAuth only (same chat stack via freebuff.*).
+	caps := RegistrationCapability{
+		AuthProvider: true,
+	}
+	fields := []pluginapi.ConfigField{
+		{
+			Name:        "debug",
+			Type:        pluginapi.ConfigFieldTypeBoolean,
+			Description: "Enable verbose Freebuff upstream logging (also settable per-credential via freebuff.json debug).",
+		},
+	}
+	if !IsCodebuffIdentity() {
+		caps.ModelProvider = true
+		caps.Executor = true
+		caps.ExecutorModelScope = pluginapi.ExecutorModelScopeBoth
+		caps.ExecutorInputFormats = []string{"chat-completions"}
+		caps.ExecutorOutputFormats = []string{"chat-completions"}
+		fields = append(fields, pluginapi.ConfigField{
+			Name:        "login_mode",
+			Type:        pluginapi.ConfigFieldTypeEnum,
+			EnumValues:  []string{"freebuff", "codebuff"},
+			Description: "Optional override for Freebuff binary OAuth host (default freebuff). Prefer the separate codebuff.* plugin for Codebuff OAuth on /oauth.",
+		})
+	}
+
 	return Registration{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
-			// Display name for CPA UI ("Freebuff OAuth" on /oauth).
-			Name:             "Freebuff",
+			// CPA /oauth entry comes from auth.identifier (+ management UI labels).
+			Name:             PluginDisplayName(),
 			Version:          PluginVer,
 			Author:           "WslzGmzs",
 			GitHubRepository: "https://github.com/WslzGmzs/freebuff2api",
-			ConfigFields: []pluginapi.ConfigField{
-				{
-					Name:        "debug",
-					Type:        pluginapi.ConfigFieldTypeBoolean,
-					Description: "Enable verbose Freebuff upstream logging (also settable per-credential via freebuff.json debug).",
-				},
-				{
-					Name:        "login_mode",
-					Type:        pluginapi.ConfigFieldTypeEnum,
-					EnumValues:  []string{"freebuff", "codebuff"},
-					Description: "Default OAuth host for auth.login.start: freebuff.com (Freebuff OAuth) or codebuff.com (Codebuff OAuth).",
-				},
-			},
+			ConfigFields:     fields,
 		},
-		Capabilities: RegistrationCapability{
-			ModelProvider:         true,
-			AuthProvider:          true,
-			Executor:              true,
-			ExecutorModelScope:    pluginapi.ExecutorModelScopeBoth,
-			ExecutorInputFormats:  []string{"chat-completions"},
-			ExecutorOutputFormats: []string{"chat-completions"},
-		},
+		Capabilities: caps,
 	}
 }
 
@@ -244,14 +333,18 @@ func (d *Dispatcher) HandleParseAuth(raw []byte) ([]byte, error) {
 	name := strings.ToLower(req.FileName)
 	sa, err := freebuff.ParseAuthStorage(req.RawJSON)
 	if err != nil || len(sa.TokenList()) == 0 {
-		if strings.Contains(name, "freebuff") {
+		if strings.Contains(name, "freebuff") || strings.Contains(name, "codebuff") {
 			return nil, fmt.Errorf("freebuff auth file missing token")
 		}
 		return OkEnvelope(pluginapi.AuthParseResponse{Handled: false})
 	}
-	if req.Provider != "" && req.Provider != ProviderName && !strings.Contains(name, "freebuff") {
+
+	// Freebuff library owns freebuff credentials; codebuff library only claims
+	// codebuff-tagged files (login_mode/provider/filename), so both can coexist.
+	if !authFileBelongsToIdentity(req.Provider, name, sa) {
 		return OkEnvelope(pluginapi.AuthParseResponse{Handled: false})
 	}
+
 	// Prefer host-configured proxy from auth dir / host summary when file omits proxy_url.
 	if sa.ProxyURL == "" && req.Host.ProxyURL != "" {
 		sa.ProxyURL = req.Host.ProxyURL
@@ -262,21 +355,58 @@ func (d *Dispatcher) HandleParseAuth(raw []byte) ([]byte, error) {
 	})
 }
 
+// authFileBelongsToIdentity decides whether this binary should claim an auth file.
+func authFileBelongsToIdentity(reqProvider, fileName string, sa freebuff.AuthStorage) bool {
+	reqProvider = strings.ToLower(strings.TrimSpace(reqProvider))
+	mode := strings.ToLower(strings.TrimSpace(sa.LoginMode))
+	prov := strings.ToLower(strings.TrimSpace(sa.Provider))
+	if IsCodebuffIdentity() {
+		if reqProvider == IdentityCodebuff {
+			return true
+		}
+		if mode == IdentityCodebuff || prov == IdentityCodebuff {
+			return true
+		}
+		if strings.Contains(fileName, "codebuff") {
+			return true
+		}
+		// Codebuff face does not claim plain freebuff tokens.
+		return false
+	}
+	// Freebuff face: default for freebuff files and untagged tokens.
+	if reqProvider != "" && reqProvider != IdentityFreebuff && reqProvider != IdentityCodebuff {
+		if !strings.Contains(fileName, "freebuff") {
+			return false
+		}
+	}
+	// Prefer freebuff for freebuff-mode; also accept codebuff-mode files if the
+	// dedicated codebuff plugin is not installed (fallback).
+	return true
+}
+
 // ToAuthData maps freebuff.json (+ host fields) onto pluginapi.AuthData.
+// Provider is always RuntimeProvider (freebuff) so chat uses freebuff executor.
 func ToAuthData(sa freebuff.AuthStorage) pluginapi.AuthData {
 	sa.Normalize()
 	// StorageJSON keeps Freebuff-owned fields; host also gets standard AuthData fields.
 	storage, _ := json.Marshal(sa)
 	fileName := AuthFileName
-	if sa.ID != "" && sa.ID != ProviderName {
-		// Unique file per credential when multiple accounts exist.
+	if sa.LoginMode == string(freebuff.LoginModeCodebuff) {
+		fileName = "codebuff.json"
+	}
+	if sa.ID != "" && sa.ID != IdentityFreebuff && sa.ID != IdentityCodebuff {
 		fileName = sa.ID + ".json"
-		if !strings.HasSuffix(fileName, ".json") {
-			fileName = sa.ID + ".json"
-		}
+	}
+	if sa.Metadata == nil {
+		sa.Metadata = map[string]any{}
+	}
+	sa.Metadata["type"] = RuntimeProvider
+	if sa.LoginMode != "" {
+		sa.Metadata["login_mode"] = sa.LoginMode
 	}
 	return pluginapi.AuthData{
-		Provider:    ProviderName,
+		// Always freebuff so model/executor routing hits freebuff.*.
+		Provider:    RuntimeProvider,
 		ID:          sa.ID,
 		FileName:    fileName,
 		Label:       sa.Label,
@@ -301,12 +431,15 @@ func (d *Dispatcher) HandleStartLogin(raw []byte) ([]byte, error) {
 	// State is the fingerprint id — host passes it back on poll.
 	d.loginSessions.Store(session.FingerprintID, session)
 
-	oauthName := "Freebuff OAuth"
+	oauthName := OAuthDisplayName()
 	if session.Mode == freebuff.LoginModeCodebuff {
 		oauthName = "Codebuff OAuth"
+	} else {
+		oauthName = "Freebuff OAuth"
 	}
 	return OkEnvelope(pluginapi.AuthLoginStartResponse{
-		Provider:  ProviderName,
+		// Must match auth.identifier so CPA routes poll to this library.
+		Provider:  AuthIdentifier(),
 		URL:       session.LoginURL,
 		State:     session.FingerprintID,
 		ExpiresAt: time.Now().Add(freebuff.LoginTTL).UTC(),
@@ -317,7 +450,7 @@ func (d *Dispatcher) HandleStartLogin(raw []byte) ([]byte, error) {
 			"label":            oauthName,
 			"fingerprint_id":   session.FingerprintID,
 			"fingerprint_hash": session.FingerprintHash,
-			"instructions":     "Complete " + oauthName + " in the browser. CPA will poll until the token is ready and save freebuff.json.",
+			"instructions":     "Complete " + oauthName + " in the browser. CPA will poll until the token is ready.",
 		},
 	})
 }
@@ -387,15 +520,19 @@ func (d *Dispatcher) HandlePollLogin(raw []byte) ([]byte, error) {
 }
 
 // resolveLoginModeAndProxy reads mode from AuthLoginStartRequest / loose JSON.
-// Supports Freebuff OAuth (default) and Codebuff OAuth via mode=codebuff.
+// Binary identity sets the default (codebuff.* → always Codebuff OAuth).
 func resolveLoginModeAndProxy(raw []byte) (freebuff.LoginMode, string) {
-	mode := freebuff.LoginModeFreebuff
+	mode := DefaultLoginMode()
 	proxy := ""
 
 	var req pluginapi.AuthLoginStartRequest
 	if err := json.Unmarshal(raw, &req); err == nil {
 		if req.Host.ProxyURL != "" {
 			proxy = req.Host.ProxyURL
+		}
+		// Request Provider from CPA is the auth.identifier (freebuff|codebuff).
+		if p := strings.ToLower(strings.TrimSpace(req.Provider)); p != "" {
+			mode = loginModeFromOAuthLabel(p)
 		}
 		if req.Metadata != nil {
 			if m, ok := stringFromAny(req.Metadata["mode"]); ok {
@@ -440,13 +577,20 @@ func resolveLoginModeAndProxy(raw []byte) (freebuff.LoginMode, string) {
 			mode = loginModeFromOAuthLabel(m)
 		}
 	}
-	// CPA /oauth may pass provider-like labels.
 	if m, ok := stringFromAny(loose["provider"]); ok {
 		mode = loginModeFromOAuthLabel(m)
 	}
+	if m, ok := stringFromAny(loose["Provider"]); ok {
+		mode = loginModeFromOAuthLabel(m)
+	}
+
+	// Codebuff binary always uses Codebuff OAuth regardless of overrides.
+	if IsCodebuffIdentity() {
+		mode = freebuff.LoginModeCodebuff
+	}
 
 	if mode != freebuff.LoginModeFreebuff && mode != freebuff.LoginModeCodebuff {
-		mode = freebuff.LoginModeFreebuff
+		mode = DefaultLoginMode()
 	}
 	return mode, proxy
 }

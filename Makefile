@@ -1,8 +1,15 @@
-PLUGIN_ID ?= freebuff
+# Dual CPA plugins from one tree:
+#   freebuff.*  — models + executor + Freebuff OAuth (auth.identifier=freebuff)
+#   codebuff.*  — Codebuff OAuth only (auth.identifier=codebuff)
+#
+# CPA lists one OAuth entry per auth.identifier; install both libraries for both
+# Freebuff OAuth and Codebuff OAuth on /oauth.
+
 GO ?= go
 CGO_ENABLED ?= 1
 VERSION ?= 0.1.0
 VERSION_PKG := github.com/WslzGmzs/freebuff2api/plugin.PluginVer
+IDENTITY_PKG := github.com/WslzGmzs/freebuff2api/plugin.Identity
 
 GOOS ?= $(shell $(GO) env GOOS)
 GOARCH ?= $(shell $(GO) env GOARCH)
@@ -16,12 +23,15 @@ else
 endif
 
 OUT_DIR := dist
-LIB := $(OUT_DIR)/$(PLUGIN_ID).$(EXT)
-ARCHIVE := $(PLUGIN_ID)_$(VERSION)_$(GOOS)_$(GOARCH).zip
+FREEBUFF_LIB := $(OUT_DIR)/freebuff.$(EXT)
+CODEBUFF_LIB := $(OUT_DIR)/codebuff.$(EXT)
 
-.PHONY: all build test tidy clean plugin package release-notes
+LDFLAGS_FREEBUFF := -s -w -X $(VERSION_PKG)=$(VERSION) -X $(IDENTITY_PKG)=freebuff
+LDFLAGS_CODEBUFF := -s -w -X $(VERSION_PKG)=$(VERSION) -X $(IDENTITY_PKG)=codebuff
 
-all: test build
+.PHONY: all build test tidy clean plugin plugins package package-all
+
+all: test plugins
 
 tidy:
 	$(GO) mod tidy
@@ -32,44 +42,51 @@ test:
 vet:
 	$(GO) vet ./...
 
-build: plugin
+build: plugins
 
-plugin:
+plugin: freebuff-plugin
+
+plugins: freebuff-plugin codebuff-plugin
+
+freebuff-plugin:
 	@mkdir -p $(OUT_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -buildmode=c-shared \
-		-ldflags "-s -w -X $(VERSION_PKG)=$(VERSION)" \
-		-o $(LIB) .
-	@rm -f $(OUT_DIR)/$(PLUGIN_ID).h $(PLUGIN_ID).h 2>/dev/null || true
-	@echo "built $(LIB)"
+		-ldflags "$(LDFLAGS_FREEBUFF)" \
+		-o $(FREEBUFF_LIB) .
+	@rm -f $(OUT_DIR)/freebuff.h freebuff.h 2>/dev/null || true
+	@echo "built $(FREEBUFF_LIB) (Freebuff OAuth + executor)"
 
-# Local store-compatible zip + per-file sha256 (does not create checksums.txt)
-package: plugin
+codebuff-plugin:
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -buildmode=c-shared \
+		-ldflags "$(LDFLAGS_CODEBUFF)" \
+		-o $(CODEBUFF_LIB) .
+	@rm -f $(OUT_DIR)/codebuff.h codebuff.h 2>/dev/null || true
+	@echo "built $(CODEBUFF_LIB) (Codebuff OAuth only)"
+
+package: freebuff-plugin
 	$(GO) run ./.github/scripts/package-release.go \
-		-library $(LIB) \
-		-archive $(ARCHIVE) \
-		-checksum $(ARCHIVE).sha256
-	@echo "packaged $(ARCHIVE)"
+		-library $(FREEBUFF_LIB) \
+		-archive freebuff_$(VERSION)_$(GOOS)_$(GOARCH).zip \
+		-checksum freebuff_$(VERSION)_$(GOOS)_$(GOARCH).zip.sha256
+	@echo "packaged freebuff_$(VERSION)_$(GOOS)_$(GOARCH).zip"
 
-# Cross-compile helpers (native CGO toolchain for target required unless using CI)
-plugin-linux-amd64:
-	@mkdir -p $(OUT_DIR)
-	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -buildmode=c-shared \
-		-ldflags "-s -w -X $(VERSION_PKG)=$(VERSION)" \
-		-o $(OUT_DIR)/$(PLUGIN_ID).so .
-
-plugin-windows-amd64:
-	@mkdir -p $(OUT_DIR)
-	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 $(GO) build -trimpath -buildmode=c-shared \
-		-ldflags "-s -w -X $(VERSION_PKG)=$(VERSION)" \
-		-o $(OUT_DIR)/$(PLUGIN_ID).dll .
+package-all: plugins
+	$(GO) run ./.github/scripts/package-release.go \
+		-library $(FREEBUFF_LIB) \
+		-archive freebuff_$(VERSION)_$(GOOS)_$(GOARCH).zip \
+		-checksum freebuff_$(VERSION)_$(GOOS)_$(GOARCH).zip.sha256
+	$(GO) run ./.github/scripts/package-release.go \
+		-library $(CODEBUFF_LIB) \
+		-archive codebuff_$(VERSION)_$(GOOS)_$(GOARCH).zip \
+		-checksum codebuff_$(VERSION)_$(GOOS)_$(GOARCH).zip.sha256
+	@echo "packaged freebuff + codebuff zips for $(GOOS)/$(GOARCH)"
 
 clean:
 	rm -rf $(OUT_DIR) *.h *.zip *.sha256
 
 release-notes:
-	@echo "Tag and push to trigger CI release:"
-	@echo "  git tag v$(VERSION)"
-	@echo "  git push origin v$(VERSION)"
-	@echo "Assets (Plugins Store):"
-	@echo "  $(PLUGIN_ID)_$(VERSION)_<goos>_<goarch>.zip"
-	@echo "  checksums.txt"
+	@echo "Install both libraries into CPA plugins/:"
+	@echo "  freebuff.$(EXT)  → Freebuff OAuth + models + chat"
+	@echo "  codebuff.$(EXT)  → Codebuff OAuth (credentials execute via freebuff)"
+	@echo "Tag: git tag v$(VERSION) && git push origin v$(VERSION)"

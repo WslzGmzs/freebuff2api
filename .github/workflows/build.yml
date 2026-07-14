@@ -1,11 +1,14 @@
-# Build multi-platform CPA plugin libraries and publish GitHub Releases
-# compatible with CLIProxyAPI-Plugins-Store install layout.
+# Build dual CPA plugins (freebuff + codebuff) and publish GitHub Releases
+# for CLIProxyAPI-Plugins-Store layout.
 #
-# Tag releases as vX.Y.Z (e.g. v0.1.0). Assets:
-#   freebuff_<version>_<goos>_<goarch>.zip   (library at zip root)
-#   checksums.txt                           (sha256sum format)
+# Tag: vX.Y.Z
+# Assets per platform:
+#   freebuff_<ver>_<goos>_<goarch>.zip   → freebuff.<ext> at zip root
+#   codebuff_<ver>_<goos>_<goarch>.zip   → codebuff.<ext> at zip root
+#   checksums.txt
 #
-# Spec: https://github.com/router-for-me/CLIProxyAPI-Plugins-Store
+# freebuff.*  auth.identifier=freebuff  (Freebuff OAuth + executor)
+# codebuff.*  auth.identifier=codebuff  (Codebuff OAuth; chat via freebuff)
 
 name: Build
 
@@ -20,7 +23,8 @@ permissions:
   contents: write
 
 env:
-  PLUGIN_ID: freebuff
+  VERSION_PKG: github.com/WslzGmzs/freebuff2api/plugin.PluginVer
+  IDENTITY_PKG: github.com/WslzGmzs/freebuff2api/plugin.Identity
 
 jobs:
   test:
@@ -92,35 +96,42 @@ jobs:
             VERSION="0.0.0-dev"
           fi
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
-          echo "LIB_NAME=${PLUGIN_ID}.${{ matrix.ext }}" >> "${GITHUB_ENV}"
-          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
-          echo "VERSION_PKG=github.com/WslzGmzs/freebuff2api/plugin.PluginVer" >> "${GITHUB_ENV}"
+          echo "EXT=${{ matrix.ext }}" >> "${GITHUB_ENV}"
+          echo "GOOS_V=${{ matrix.goos }}" >> "${GITHUB_ENV}"
+          echo "GOARCH_V=${{ matrix.goarch }}" >> "${GITHUB_ENV}"
 
-      - name: Build shared library
+      - name: Build freebuff + codebuff shared libraries
         run: |
           set -euo pipefail
           mkdir -p dist
-          CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -buildmode=c-shared \
-              -ldflags "-s -w -X ${VERSION_PKG}=${VERSION}" \
-              -o "dist/${LIB_NAME}" .
-          rm -f "dist/${PLUGIN_ID}.h"
+          for ID in freebuff codebuff; do
+            CGO_ENABLED=1 GOOS="${GOOS_V}" GOARCH="${GOARCH_V}" \
+              go build -trimpath -buildmode=c-shared \
+                -ldflags "-s -w -X ${VERSION_PKG}=${VERSION} -X ${IDENTITY_PKG}=${ID}" \
+                -o "dist/${ID}.${EXT}" .
+            rm -f "dist/${ID}.h"
+          done
 
-      - name: Package plugin
+      - name: Package plugins
         run: |
           set -euo pipefail
-          go run ./.github/scripts/package-release.go \
-            -library "dist/${LIB_NAME}" \
-            -archive "${ARCHIVE_NAME}" \
-            -checksum "${ARCHIVE_NAME}.sha256"
+          for ID in freebuff codebuff; do
+            ARCHIVE="${ID}_${VERSION}_${GOOS_V}_${GOARCH_V}.zip"
+            go run ./.github/scripts/package-release.go \
+              -library "dist/${ID}.${EXT}" \
+              -archive "${ARCHIVE}" \
+              -checksum "${ARCHIVE}.sha256"
+          done
 
-      - name: Upload build artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARCHIVE_NAME }}
+          name: plugins_${{ matrix.goos }}_${{ matrix.goarch }}
           path: |
-            ${{ env.ARCHIVE_NAME }}
-            ${{ env.ARCHIVE_NAME }}.sha256
+            freebuff_*.zip
+            freebuff_*.zip.sha256
+            codebuff_*.zip
+            codebuff_*.zip.sha256
           if-no-files-found: error
 
   build-windows-arm64:
@@ -151,9 +162,8 @@ jobs:
           fi
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_windows_arm64.zip" >> "${GITHUB_ENV}"
 
-      - name: Build Windows ARM64 shared library
+      - name: Build freebuff windows/arm64
         timeout-minutes: 45
         uses: go-cross/cgo-actions@v1
         env:
@@ -162,27 +172,50 @@ jobs:
           dir: .
           packages: .
           targets: windows-arm64
-          out-dir: dist/windows-arm64
-          output: ${{ env.PLUGIN_ID }}.dll
+          out-dir: dist/windows-arm64-freebuff
+          output: freebuff.dll
           flags: -ldflags=-s -w
-          x-flags: github.com/WslzGmzs/freebuff2api/plugin.PluginVer=${{ steps.release_metadata.outputs.version }}
+          x-flags: |
+            github.com/WslzGmzs/freebuff2api/plugin.PluginVer=${{ steps.release_metadata.outputs.version }}
+            github.com/WslzGmzs/freebuff2api/plugin.Identity=freebuff
 
-      - name: Package plugin
+      - name: Build codebuff windows/arm64
+        timeout-minutes: 45
+        uses: go-cross/cgo-actions@v1
+        env:
+          GOFLAGS: -trimpath -buildmode=c-shared
+        with:
+          dir: .
+          packages: .
+          targets: windows-arm64
+          out-dir: dist/windows-arm64-codebuff
+          output: codebuff.dll
+          flags: -ldflags=-s -w
+          x-flags: |
+            github.com/WslzGmzs/freebuff2api/plugin.PluginVer=${{ steps.release_metadata.outputs.version }}
+            github.com/WslzGmzs/freebuff2api/plugin.Identity=codebuff
+
+      - name: Package plugins
         run: |
           set -euo pipefail
-          rm -f go-cross-bin.h "dist/windows-arm64/${PLUGIN_ID}.h"
-          go run ./.github/scripts/package-release.go \
-            -library "dist/windows-arm64/${PLUGIN_ID}.dll" \
-            -archive "${ARCHIVE_NAME}" \
-            -checksum "${ARCHIVE_NAME}.sha256"
+          rm -f go-cross-bin.h dist/windows-arm64-freebuff/*.h dist/windows-arm64-codebuff/*.h
+          for ID in freebuff codebuff; do
+            ARCHIVE="${ID}_${VERSION}_windows_arm64.zip"
+            go run ./.github/scripts/package-release.go \
+              -library "dist/windows-arm64-${ID}/${ID}.dll" \
+              -archive "${ARCHIVE}" \
+              -checksum "${ARCHIVE}.sha256"
+          done
 
-      - name: Upload build artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARCHIVE_NAME }}
+          name: plugins_windows_arm64
           path: |
-            ${{ env.ARCHIVE_NAME }}
-            ${{ env.ARCHIVE_NAME }}.sha256
+            freebuff_*.zip
+            freebuff_*.zip.sha256
+            codebuff_*.zip
+            codebuff_*.zip.sha256
           if-no-files-found: error
 
   build-freebsd:
@@ -218,7 +251,6 @@ jobs:
           fi
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_freebsd_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
 
       - name: Install FreeBSD cross-build dependencies
         run: |
@@ -226,7 +258,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang lld wget
 
-      - name: Build FreeBSD shared library
+      - name: Build freebuff freebsd
         timeout-minutes: 45
         uses: go-cross/cgo-actions@v1
         env:
@@ -235,27 +267,50 @@ jobs:
           dir: .
           packages: .
           targets: freebsd-${{ matrix.goarch }}
-          out-dir: dist/freebsd-${{ matrix.goarch }}
-          output: ${{ env.PLUGIN_ID }}.so
+          out-dir: dist/freebsd-freebuff
+          output: freebuff.so
           flags: -ldflags=-s -w
-          x-flags: github.com/WslzGmzs/freebuff2api/plugin.PluginVer=${{ steps.release_metadata.outputs.version }}
+          x-flags: |
+            github.com/WslzGmzs/freebuff2api/plugin.PluginVer=${{ steps.release_metadata.outputs.version }}
+            github.com/WslzGmzs/freebuff2api/plugin.Identity=freebuff
 
-      - name: Package plugin
+      - name: Build codebuff freebsd
+        timeout-minutes: 45
+        uses: go-cross/cgo-actions@v1
+        env:
+          GOFLAGS: -trimpath -buildmode=c-shared
+        with:
+          dir: .
+          packages: .
+          targets: freebsd-${{ matrix.goarch }}
+          out-dir: dist/freebsd-codebuff
+          output: codebuff.so
+          flags: -ldflags=-s -w
+          x-flags: |
+            github.com/WslzGmzs/freebuff2api/plugin.PluginVer=${{ steps.release_metadata.outputs.version }}
+            github.com/WslzGmzs/freebuff2api/plugin.Identity=codebuff
+
+      - name: Package plugins
         run: |
           set -euo pipefail
-          rm -f go-cross-bin.h "dist/freebsd-${{ matrix.goarch }}/${PLUGIN_ID}.h"
-          go run ./.github/scripts/package-release.go \
-            -library "dist/freebsd-${{ matrix.goarch }}/${PLUGIN_ID}.so" \
-            -archive "${ARCHIVE_NAME}" \
-            -checksum "${ARCHIVE_NAME}.sha256"
+          rm -f go-cross-bin.h dist/freebsd-freebuff/*.h dist/freebsd-codebuff/*.h
+          for ID in freebuff codebuff; do
+            ARCHIVE="${ID}_${VERSION}_freebsd_${{ matrix.goarch }}.zip"
+            go run ./.github/scripts/package-release.go \
+              -library "dist/freebsd-${ID}/${ID}.so" \
+              -archive "${ARCHIVE}" \
+              -checksum "${ARCHIVE}.sha256"
+          done
 
-      - name: Upload build artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARCHIVE_NAME }}
+          name: plugins_freebsd_${{ matrix.goarch }}
           path: |
-            ${{ env.ARCHIVE_NAME }}
-            ${{ env.ARCHIVE_NAME }}.sha256
+            freebuff_*.zip
+            freebuff_*.zip.sha256
+            codebuff_*.zip
+            codebuff_*.zip.sha256
           if-no-files-found: error
 
   release:
@@ -279,11 +334,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          sort dist/*.sha256 > dist/checksums.txt
+          find dist -name '*.sha256' -print0 | xargs -0 cat | sort > dist/checksums.txt
+          mapfile -t ZIPS < <(find dist -name '*.zip' | sort)
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release upload "${GITHUB_REF_NAME}" "${ZIPS[@]}" dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
           else
-            gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt \
+            gh release create "${GITHUB_REF_NAME}" "${ZIPS[@]}" dist/checksums.txt \
               --repo "${GITHUB_REPOSITORY}" \
               --verify-tag \
               --title "${GITHUB_REF_NAME}" \

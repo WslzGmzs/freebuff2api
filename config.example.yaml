@@ -2,12 +2,16 @@ plugins:
   enabled: true
   dir: "plugins"
   configs:
+    # Freebuff OAuth + models + chat executor (required)
     freebuff:
       enabled: true
       priority: 100
-      # Default OAuth on CPA /oauth: freebuff → "Freebuff OAuth", codebuff → "Codebuff OAuth"
-      login_mode: freebuff
       debug: false
+    # Codebuff OAuth entry on /oauth (optional but recommended)
+    # Install codebuff.<dll|so|dylib> next to freebuff.*
+    codebuff:
+      enabled: true
+      priority: 99
 
 api-keys:
   - "sk-local"
