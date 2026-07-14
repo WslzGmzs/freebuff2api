@@ -356,54 +356,79 @@ func (d *Dispatcher) HandleParseAuth(raw []byte) ([]byte, error) {
 }
 
 // authFileBelongsToIdentity decides whether this binary should claim an auth file.
+// Freebuff and Codebuff credentials are strictly partitioned by filename / login_mode /
+// credential_source so they never share the same auth file on disk.
 func authFileBelongsToIdentity(reqProvider, fileName string, sa freebuff.AuthStorage) bool {
 	reqProvider = strings.ToLower(strings.TrimSpace(reqProvider))
+	fileName = strings.ToLower(strings.TrimSpace(fileName))
 	mode := strings.ToLower(strings.TrimSpace(sa.LoginMode))
-	prov := strings.ToLower(strings.TrimSpace(sa.Provider))
+	src := strings.ToLower(sa.CredentialSource())
+	if srcAttr, ok := sa.Attributes["credential_source"]; ok {
+		if s := strings.ToLower(strings.TrimSpace(srcAttr)); s != "" {
+			src = s
+		}
+	}
+	isCodebuffFile := strings.Contains(fileName, "codebuff") ||
+		mode == IdentityCodebuff ||
+		src == IdentityCodebuff ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(sa.ID)), "codebuff-")
+	isFreebuffFile := strings.Contains(fileName, "freebuff") ||
+		(!isCodebuffFile && (mode == IdentityFreebuff || mode == "" || src == IdentityFreebuff))
+
 	if IsCodebuffIdentity() {
+		// Codebuff OAuth plugin only owns codebuff-namespaced credentials.
 		if reqProvider == IdentityCodebuff {
 			return true
 		}
-		if mode == IdentityCodebuff || prov == IdentityCodebuff {
-			return true
-		}
-		if strings.Contains(fileName, "codebuff") {
-			return true
-		}
-		// Codebuff face does not claim plain freebuff tokens.
+		return isCodebuffFile
+	}
+
+	// Freebuff plugin never claims codebuff-namespaced files (separate credential store).
+	if isCodebuffFile {
 		return false
 	}
-	// Freebuff face: default for freebuff files and untagged tokens.
 	if reqProvider != "" && reqProvider != IdentityFreebuff && reqProvider != IdentityCodebuff {
-		if !strings.Contains(fileName, "freebuff") {
-			return false
-		}
+		return isFreebuffFile || strings.Contains(fileName, "freebuff")
 	}
-	// Prefer freebuff for freebuff-mode; also accept codebuff-mode files if the
-	// dedicated codebuff plugin is not installed (fallback).
 	return true
 }
 
-// ToAuthData maps freebuff.json (+ host fields) onto pluginapi.AuthData.
+// credentialFileName picks a distinct on-disk name for freebuff vs codebuff credentials.
+//
+//	freebuff → freebuff.json or freebuff-<hash>.json
+//	codebuff → codebuff.json or codebuff-<hash>.json
+func credentialFileName(sa freebuff.AuthStorage) string {
+	base := sa.AuthFileName() // freebuff.json | codebuff.json
+	id := strings.TrimSpace(sa.ID)
+	if id == "" || id == IdentityFreebuff || id == IdentityCodebuff {
+		return base
+	}
+	// Prefer id-based unique files; id is already freebuff-*/codebuff-* prefixed.
+	if strings.HasSuffix(strings.ToLower(id), ".json") {
+		return id
+	}
+	return id + ".json"
+}
+
+// ToAuthData maps freebuff.json / codebuff.json (+ host fields) onto pluginapi.AuthData.
 // Provider is always RuntimeProvider (freebuff) so chat uses freebuff executor.
+// FileName / ID stay namespaced so Freebuff and Codebuff OAuth never overwrite each other.
 func ToAuthData(sa freebuff.AuthStorage) pluginapi.AuthData {
 	sa.Normalize()
 	// StorageJSON keeps Freebuff-owned fields; host also gets standard AuthData fields.
 	storage, _ := json.Marshal(sa)
-	fileName := AuthFileName
-	if sa.LoginMode == string(freebuff.LoginModeCodebuff) {
-		fileName = "codebuff.json"
-	}
-	if sa.ID != "" && sa.ID != IdentityFreebuff && sa.ID != IdentityCodebuff {
-		fileName = sa.ID + ".json"
-	}
+	fileName := credentialFileName(sa)
 	if sa.Metadata == nil {
 		sa.Metadata = map[string]any{}
 	}
 	sa.Metadata["type"] = RuntimeProvider
-	if sa.LoginMode != "" {
-		sa.Metadata["login_mode"] = sa.LoginMode
+	sa.Metadata["login_mode"] = sa.LoginMode
+	sa.Metadata["credential_source"] = sa.CredentialSource()
+	if sa.Attributes == nil {
+		sa.Attributes = map[string]string{}
 	}
+	sa.Attributes["credential_source"] = sa.CredentialSource()
+	sa.Attributes["login_mode"] = sa.LoginMode
 	return pluginapi.AuthData{
 		// Always freebuff so model/executor routing hits freebuff.*.
 		Provider:    RuntimeProvider,

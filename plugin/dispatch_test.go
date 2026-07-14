@@ -237,6 +237,43 @@ func TestToAuthDataRuntimeProvider(t *testing.T) {
 	if ad.Label != "Codebuff OAuth" {
 		t.Fatalf("label=%s", ad.Label)
 	}
+	if !strings.HasPrefix(ad.ID, "codebuff-") {
+		t.Fatalf("id=%s", ad.ID)
+	}
+	if ad.FileName != "codebuff.json" && !strings.HasPrefix(ad.FileName, "codebuff-") {
+		t.Fatalf("file=%s want codebuff namespaced", ad.FileName)
+	}
+}
+
+func TestToAuthDataSeparatesFreebuffAndCodebuffFiles(t *testing.T) {
+	fb := ToAuthData(freebuff.AuthStorage{Token: "same", LoginMode: "freebuff"})
+	cb := ToAuthData(freebuff.AuthStorage{Token: "same", LoginMode: "codebuff"})
+	if fb.ID == cb.ID {
+		t.Fatalf("ids must differ: %s", fb.ID)
+	}
+	if fb.FileName == cb.FileName {
+		t.Fatalf("filenames must differ: %s", fb.FileName)
+	}
+	if !strings.Contains(fb.FileName, "freebuff") {
+		t.Fatalf("freebuff file=%s", fb.FileName)
+	}
+	if !strings.Contains(cb.FileName, "codebuff") {
+		t.Fatalf("codebuff file=%s", cb.FileName)
+	}
+}
+
+func TestFreebuffDoesNotClaimCodebuffFile(t *testing.T) {
+	Identity = IdentityFreebuff
+	if authFileBelongsToIdentity("", "codebuff.json", freebuff.AuthStorage{
+		Token: "t", LoginMode: "codebuff",
+	}) {
+		t.Fatal("freebuff plugin must not claim codebuff.json")
+	}
+	if !authFileBelongsToIdentity("", "freebuff.json", freebuff.AuthStorage{
+		Token: "t", LoginMode: "freebuff",
+	}) {
+		t.Fatal("freebuff plugin should claim freebuff.json")
+	}
 }
 
 func TestLoginModeFromOAuthLabel(t *testing.T) {

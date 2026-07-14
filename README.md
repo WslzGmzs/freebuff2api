@@ -78,9 +78,17 @@ CPA 根据各库的 `auth.identifier` 暴露 OAuth 入口（对应
 | **Codebuff OAuth** | `codebuff.*` | codebuff.com CLI device-code |
 
 流程：`auth.login.start` → 浏览器登录 → `auth.login.poll` → 校验 session → 写入凭据。  
-登录成功后 `AuthData.Provider` 为 **`freebuff`**，聊天仍由 freebuff executor 执行。
+登录成功后 `AuthData.Provider` 为 **`freebuff`**（执行路由），但 **磁盘凭据文件与 ID 按来源分开**：
 
-也可手动粘贴 token（见下）。
+| OAuth | 默认文件名 | ID 前缀 | `login_mode` |
+|-------|------------|---------|--------------|
+| Freebuff OAuth | `freebuff.json` / `freebuff-<hash>.json` | `freebuff-` | `freebuff` |
+| Codebuff OAuth | `codebuff.json` / `codebuff-<hash>.json` | `codebuff-` | `codebuff` |
+
+同一 token 走两种 OAuth 也会得到不同 id/文件，不会互相覆盖。  
+聊天仍由 freebuff executor 执行。
+
+也可手动粘贴 token（见 `auth/freebuff.example.json`、`auth/codebuff.example.json`）。
 
 ## 凭据 `freebuff.json`（CPA 标准字段 + Freebuff 扩展）
 

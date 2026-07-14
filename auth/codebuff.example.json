@@ -1,32 +1,30 @@
 {
-  "id": "freebuff-example",
+  "id": "codebuff-example",
   "provider": "freebuff",
   "type": "freebuff",
-  "label": "Freebuff OAuth",
+  "label": "Codebuff OAuth",
   "prefix": "",
   "proxy_url": "",
   "priority": 0,
   "disabled": false,
-  "token": "YOUR_FREEBUFF_BEARER_TOKEN",
+  "token": "YOUR_CODEBUFF_OR_FREEBUFF_BEARER_TOKEN",
   "tokens": [],
+  "login_mode": "codebuff",
   "api_base_url": "https://www.codebuff.com",
-  "zeroclick_base_url": "https://zeroclick.dev",
   "ad_providers": ["gravity", "zeroclick"],
   "timezone": "Asia/Shanghai",
   "locale": "zh-CN",
   "os": "windows",
-  "login_mode": "freebuff",
   "debug": false,
   "attributes": {
     "provider": "freebuff",
-    "login_mode": "freebuff",
-    "credential_source": "freebuff"
+    "login_mode": "codebuff",
+    "credential_source": "codebuff"
   },
   "metadata": {
     "type": "freebuff",
-    "login_mode": "freebuff",
-    "credential_source": "freebuff",
+    "login_mode": "codebuff",
+    "credential_source": "codebuff",
     "oauth": true
   }
 }
-

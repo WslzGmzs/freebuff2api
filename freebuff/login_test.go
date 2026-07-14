@@ -36,9 +36,30 @@ func TestAuthStorageFromToken(t *testing.T) {
 	if sa.Provider != "freebuff" {
 		t.Fatalf("provider=%s", sa.Provider)
 	}
+	if !strings.HasPrefix(sa.ID, "freebuff-") {
+		t.Fatalf("id=%s want freebuff- prefix", sa.ID)
+	}
+	if sa.AuthFileName() != "freebuff.json" {
+		t.Fatalf("file=%s", sa.AuthFileName())
+	}
 	sa = AuthStorageFromToken("tok", nil, LoginModeCodebuff)
 	if sa.Label != "Codebuff OAuth" {
 		t.Fatalf("label=%s", sa.Label)
+	}
+	if !strings.HasPrefix(sa.ID, "codebuff-") {
+		t.Fatalf("id=%s want codebuff- prefix", sa.ID)
+	}
+	if sa.AuthFileName() != "codebuff.json" {
+		t.Fatalf("file=%s", sa.AuthFileName())
+	}
+	// Same token via both OAuth faces must not share id/file.
+	fb := AuthStorageFromToken("same-token", nil, LoginModeFreebuff)
+	cb := AuthStorageFromToken("same-token", nil, LoginModeCodebuff)
+	if fb.ID == cb.ID {
+		t.Fatalf("ids collide: %s", fb.ID)
+	}
+	if fb.AuthFileName() == cb.AuthFileName() {
+		t.Fatal("filenames collide")
 	}
 }
 

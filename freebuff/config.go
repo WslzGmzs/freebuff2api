@@ -178,6 +178,33 @@ func ParseAuthStorage(raw []byte) (AuthStorage, error) {
 	return a, nil
 }
 
+// CredentialSource is freebuff or codebuff — drives filename / id prefixes.
+func (a AuthStorage) CredentialSource() string {
+	mode := strings.ToLower(strings.TrimSpace(a.LoginMode))
+	if mode == string(LoginModeCodebuff) {
+		return string(LoginModeCodebuff)
+	}
+	// Filename / explicit type hints when login_mode missing.
+	if strings.EqualFold(strings.TrimSpace(a.Type), string(LoginModeCodebuff)) {
+		return string(LoginModeCodebuff)
+	}
+	return string(LoginModeFreebuff)
+}
+
+// IsCodebuffCredential reports whether this storage is a Codebuff OAuth/login credential.
+func (a AuthStorage) IsCodebuffCredential() bool {
+	return a.CredentialSource() == string(LoginModeCodebuff)
+}
+
+// AuthFileName returns the default on-disk credential file name for this storage.
+// Freebuff → freebuff.json；Codebuff → codebuff.json（与 OAuth 入口分离）.
+func (a AuthStorage) AuthFileName() string {
+	if a.IsCodebuffCredential() {
+		return "codebuff.json"
+	}
+	return "freebuff.json"
+}
+
 // Normalize prepares IDs/tokens before persist or AuthData conversion.
 func (a *AuthStorage) Normalize() {
 	if len(a.Tokens) == 0 {
@@ -186,14 +213,24 @@ func (a *AuthStorage) Normalize() {
 	if a.Token == "" && len(a.Tokens) > 0 {
 		a.Token = strings.Join(a.Tokens, ",")
 	}
-	if a.Provider == "" {
-		a.Provider = "freebuff"
+	// login_mode defaults to freebuff unless already codebuff.
+	if a.LoginMode == "" {
+		if strings.EqualFold(strings.TrimSpace(a.Type), string(LoginModeCodebuff)) {
+			a.LoginMode = string(LoginModeCodebuff)
+		} else {
+			a.LoginMode = string(LoginModeFreebuff)
+		}
 	}
-	if a.Type == "" {
-		a.Type = "freebuff"
-	}
+	// Runtime provider for CPA executor routing is always freebuff.
+	// Source of the credential (oauth host) is login_mode + attributes.credential_source.
+	a.Provider = "freebuff"
+	a.Type = "freebuff"
+	src := a.CredentialSource()
 	if a.ID == "" {
-		a.ID = DeriveAuthID(a.TokenList())
+		a.ID = DeriveAuthID(a.TokenList(), src)
+	} else {
+		// Keep mode-prefixed ids stable if already set correctly; rewrite freebuff-→codebuff- when needed.
+		a.ID = ensureIDPrefix(a.ID, src)
 	}
 	if a.Label == "" {
 		a.Label = defaultLabel(*a)
@@ -203,9 +240,8 @@ func (a *AuthStorage) Normalize() {
 	}
 	a.Metadata["type"] = "freebuff"
 	a.Metadata["token_count"] = len(a.TokenList())
-	if a.LoginMode != "" {
-		a.Metadata["login_mode"] = a.LoginMode
-	}
+	a.Metadata["login_mode"] = a.LoginMode
+	a.Metadata["credential_source"] = src
 	if a.Priority != 0 {
 		a.Metadata["priority"] = a.Priority
 	}
@@ -213,9 +249,8 @@ func (a *AuthStorage) Normalize() {
 		a.Attributes = map[string]string{}
 	}
 	a.Attributes["provider"] = "freebuff"
-	if a.LoginMode != "" {
-		a.Attributes["login_mode"] = a.LoginMode
-	}
+	a.Attributes["login_mode"] = a.LoginMode
+	a.Attributes["credential_source"] = src
 	if a.Priority != 0 {
 		a.Attributes["priority"] = strconv.Itoa(a.Priority)
 	}
@@ -223,9 +258,9 @@ func (a *AuthStorage) Normalize() {
 
 func defaultLabel(a AuthStorage) string {
 	n := len(a.TokenList())
-	base := "Freebuff"
-	if a.LoginMode == string(LoginModeCodebuff) {
-		base = "Codebuff"
+	base := "Freebuff OAuth"
+	if a.IsCodebuffCredential() {
+		base = "Codebuff OAuth"
 	}
 	if n > 1 {
 		return fmt.Sprintf("%s (%d tokens)", base, n)
@@ -233,13 +268,42 @@ func defaultLabel(a AuthStorage) string {
 	return base
 }
 
-// DeriveAuthID builds a stable id from token material.
-func DeriveAuthID(tokens []string) string {
-	if len(tokens) == 0 {
-		return "freebuff-" + randomHex(4)
+// DeriveAuthID builds a stable id from token material, namespaced by credential source.
+// freebuff → freebuff-<hash>；codebuff → codebuff-<hash>（避免两边撞同一 id/文件）.
+func DeriveAuthID(tokens []string, source string) string {
+	src := strings.ToLower(strings.TrimSpace(source))
+	if src != string(LoginModeCodebuff) {
+		src = string(LoginModeFreebuff)
 	}
-	h := sha256.Sum256([]byte(strings.Join(tokens, ",")))
-	return "freebuff-" + hex.EncodeToString(h[:8])
+	if len(tokens) == 0 {
+		return src + "-" + randomHex(4)
+	}
+	// Include source in hash so the same token logged in via both OAuth faces
+	// still gets distinct ids/files.
+	h := sha256.Sum256([]byte(src + "|" + strings.Join(tokens, ",")))
+	return src + "-" + hex.EncodeToString(h[:8])
+}
+
+func ensureIDPrefix(id, source string) string {
+	id = strings.TrimSpace(id)
+	src := strings.ToLower(strings.TrimSpace(source))
+	if src != string(LoginModeCodebuff) {
+		src = string(LoginModeFreebuff)
+	}
+	if id == "" {
+		return src + "-" + randomHex(4)
+	}
+	// Already correctly namespaced.
+	if strings.HasPrefix(strings.ToLower(id), src+"-") {
+		return id
+	}
+	// Migrate freebuff-xxx → codebuff-xxx (or vice versa) by re-prefixing.
+	for _, p := range []string{"freebuff-", "codebuff-"} {
+		if strings.HasPrefix(strings.ToLower(id), p) {
+			return src + "-" + id[len(p):]
+		}
+	}
+	return src + "-" + id
 }
 
 // ToSettings builds client settings for a single token.
@@ -271,8 +335,13 @@ func (a AuthStorage) ToSettings(token string, hostProxy string) Settings {
 	}
 }
 
-// AuthStorageFromToken builds freebuff.json after successful OAuth/CLI login.
+// AuthStorageFromToken builds a namespaced credential after successful OAuth/CLI login.
+// Freebuff → freebuff.json / freebuff-<hash>；Codebuff → codebuff.json / codebuff-<hash>.
+// Runtime provider stays freebuff so chat still hits the freebuff executor.
 func AuthStorageFromToken(token string, user *LoginUser, mode LoginMode) AuthStorage {
+	if mode != LoginModeCodebuff {
+		mode = LoginModeFreebuff
+	}
 	label := "Freebuff OAuth"
 	if mode == LoginModeCodebuff {
 		label = "Codebuff OAuth"
@@ -284,20 +353,25 @@ func AuthStorageFromToken(token string, user *LoginUser, mode LoginMode) AuthSto
 			label = user.Email + " · " + label
 		}
 	}
+	src := string(mode)
 	sa := AuthStorage{
+		// Executor routing key (CPA).
 		Provider:  "freebuff",
 		Type:      "freebuff",
 		Token:     token,
 		Label:     label,
 		LoginMode: string(mode),
+		ID:        DeriveAuthID([]string{token}, src),
 		Metadata: map[string]any{
-			"type":       "freebuff",
-			"login_mode": string(mode),
-			"oauth":      true,
+			"type":              "freebuff",
+			"login_mode":        string(mode),
+			"credential_source": src,
+			"oauth":             true,
 		},
 		Attributes: map[string]string{
-			"provider":   "freebuff",
-			"login_mode": string(mode),
+			"provider":          "freebuff",
+			"login_mode":        string(mode),
+			"credential_source": src,
 		},
 	}
 	if user != nil {
