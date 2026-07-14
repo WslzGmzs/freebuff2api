@@ -1,9 +1,9 @@
 {
   "id": "freebuff",
   "name": "Freebuff",
-  "description": "Codebuff Freebuff provider for CLIProxyAPI: multi-token Freebuff sessions, CLI device-code login, and OpenAI chat-completions executor for free upstream models (including Gemini→MiMo aliases).",
+  "description": "Codebuff Freebuff provider for CLIProxyAPI: multi-token Freebuff sessions, Freebuff OAuth login, and OpenAI chat-completions executor (including Gemini→MiMo aliases). Install together with the companion codebuff plugin for Codebuff OAuth on /oauth.",
   "author": "WslzGmzs",
-  "version": "0.1.0",
+  "version": "0.1.6",
   "repository": "https://github.com/WslzGmzs/freebuff2api",
   "homepage": "https://github.com/WslzGmzs/freebuff2api",
   "license": "AGPL-3.0",
@@ -11,6 +11,6 @@
     "Provider",
     "Freebuff",
     "Codebuff",
-    "Management"
+    "OAuth"
   ]
 }

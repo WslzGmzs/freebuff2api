@@ -9,8 +9,18 @@ The official store **only** hosts a root `registry.json`. Plugin binaries and
 
 | File | Role |
 |------|------|
-| **`registry.json`** | Full store document shape (`schema_version` + `plugins[]`). Use for local validation / private store mirrors. |
-| **`registry-entry.json`** | Single plugin object only. When opening a PR to the official store, **append this object** into their `plugins` array (do not replace their whole file with this object alone). |
+| **`registry.json`** | Full store document with **both** `freebuff` and `codebuff` entries. |
+| **`registry-entry.json`** | `freebuff` only — append to official store PR. |
+| **`registry-entry-codebuff.json`** | `codebuff` only — append as a **second** store entry (same repo). |
+
+CPA store install looks up **latest release** of `repository` for asset:
+
+```text
+<id>_<version>_<goos>_<goarch>.zip
+```
+
+So `id: freebuff` installs `freebuff_…zip` only.  
+To install Codebuff OAuth from the store you need a **separate** registry entry `id: codebuff` **and** release assets named `codebuff_…zip`.
 
 ## Official `registry.json` shape (required)
 

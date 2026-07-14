@@ -1,0 +1,15 @@
+{
+  "id": "codebuff",
+  "name": "Codebuff OAuth",
+  "description": "Companion CLIProxyAPI plugin: Codebuff OAuth login only (auth.identifier=codebuff). Chat execution requires the freebuff plugin from the same repository. Release assets: codebuff_<version>_<goos>_<goarch>.zip.",
+  "author": "WslzGmzs",
+  "version": "0.1.6",
+  "repository": "https://github.com/WslzGmzs/freebuff2api",
+  "homepage": "https://github.com/WslzGmzs/freebuff2api",
+  "license": "AGPL-3.0",
+  "tags": [
+    "Provider",
+    "Codebuff",
+    "OAuth"
+  ]
+}
