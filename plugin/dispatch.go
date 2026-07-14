@@ -91,10 +91,6 @@ func (d *Dispatcher) Handle(method string, request []byte) ([]byte, error) {
 		return d.HandleExecExecute(request)
 	case pluginabi.MethodExecutorExecuteStream:
 		return d.HandleExecStream(request)
-	case pluginabi.MethodManagementRegister:
-		return OkEnvelope(managementRegistration())
-	case pluginabi.MethodManagementHandle:
-		return d.HandleManagement(request)
 	default:
 		return ErrorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
@@ -130,7 +126,6 @@ type RegistrationCapability struct {
 	ExecutorModelScope    pluginapi.ExecutorModelScope `json:"executor_model_scope"`
 	ExecutorInputFormats  []string                     `json:"executor_input_formats,omitempty"`
 	ExecutorOutputFormats []string                     `json:"executor_output_formats,omitempty"`
-	ManagementAPI         bool                         `json:"management_api"`
 }
 
 type StreamResponse struct {
@@ -148,7 +143,8 @@ func (d *Dispatcher) Registration() Registration {
 	return Registration{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
-			Name:             ProviderName,
+			// Display name for CPA UI ("Freebuff OAuth" on /oauth).
+			Name:             "Freebuff",
 			Version:          PluginVer,
 			Author:           "WslzGmzs",
 			GitHubRepository: "https://github.com/WslzGmzs/freebuff2api",
@@ -162,7 +158,7 @@ func (d *Dispatcher) Registration() Registration {
 					Name:        "login_mode",
 					Type:        pluginapi.ConfigFieldTypeEnum,
 					EnumValues:  []string{"freebuff", "codebuff"},
-					Description: "Default CLI login host for auth.login.start (freebuff.com or codebuff.com).",
+					Description: "Default OAuth host for auth.login.start: freebuff.com (Freebuff OAuth) or codebuff.com (Codebuff OAuth).",
 				},
 			},
 		},
@@ -173,7 +169,6 @@ func (d *Dispatcher) Registration() Registration {
 			ExecutorModelScope:    pluginapi.ExecutorModelScopeBoth,
 			ExecutorInputFormats:  []string{"chat-completions"},
 			ExecutorOutputFormats: []string{"chat-completions"},
-			ManagementAPI:         true,
 		},
 	}
 }
@@ -239,7 +234,7 @@ func (d *Dispatcher) Models() []pluginapi.ModelInfo {
 	return out
 }
 
-// ----- auth -----
+// ----- auth (CPA /oauth via auth.login.*) -----
 
 func (d *Dispatcher) HandleParseAuth(raw []byte) ([]byte, error) {
 	var req pluginapi.AuthParseRequest
@@ -257,64 +252,59 @@ func (d *Dispatcher) HandleParseAuth(raw []byte) ([]byte, error) {
 	if req.Provider != "" && req.Provider != ProviderName && !strings.Contains(name, "freebuff") {
 		return OkEnvelope(pluginapi.AuthParseResponse{Handled: false})
 	}
+	// Prefer host-configured proxy from auth dir / host summary when file omits proxy_url.
+	if sa.ProxyURL == "" && req.Host.ProxyURL != "" {
+		sa.ProxyURL = req.Host.ProxyURL
+	}
 	return OkEnvelope(pluginapi.AuthParseResponse{
 		Handled: true,
 		Auth:    ToAuthData(sa),
 	})
 }
 
+// ToAuthData maps freebuff.json (+ host fields) onto pluginapi.AuthData.
 func ToAuthData(sa freebuff.AuthStorage) pluginapi.AuthData {
-	if len(sa.Tokens) == 0 {
-		sa.Tokens = sa.TokenList()
-	}
-	if sa.Token == "" && len(sa.Tokens) > 0 {
-		sa.Token = strings.Join(sa.Tokens, ",")
-	}
+	sa.Normalize()
+	// StorageJSON keeps Freebuff-owned fields; host also gets standard AuthData fields.
 	storage, _ := json.Marshal(sa)
-	label := sa.Label
-	if label == "" {
-		label = "Freebuff"
-		if n := len(sa.TokenList()); n > 1 {
-			label = fmt.Sprintf("Freebuff (%d tokens)", n)
+	fileName := AuthFileName
+	if sa.ID != "" && sa.ID != ProviderName {
+		// Unique file per credential when multiple accounts exist.
+		fileName = sa.ID + ".json"
+		if !strings.HasSuffix(fileName, ".json") {
+			fileName = sa.ID + ".json"
 		}
 	}
 	return pluginapi.AuthData{
 		Provider:    ProviderName,
-		ID:          ProviderName,
-		FileName:    AuthFileName,
-		Label:       label,
+		ID:          sa.ID,
+		FileName:    fileName,
+		Label:       sa.Label,
+		Prefix:      sa.Prefix,
+		ProxyURL:    sa.ProxyURL,
+		Disabled:    sa.Disabled,
 		StorageJSON: storage,
-		Metadata:    map[string]any{"type": ProviderName, "token_count": len(sa.TokenList())},
+		Metadata:    sa.Metadata,
+		Attributes:  sa.Attributes,
 	}
 }
 
 func (d *Dispatcher) HandleStartLogin(raw []byte) ([]byte, error) {
-	mode := freebuff.LoginModeFreebuff
-	// Optional metadata / plugin config: {"mode":"codebuff"} or Host fields.
-	var loose map[string]any
-	_ = json.Unmarshal(raw, &loose)
-	if m, ok := stringFromAny(loose["mode"]); ok {
-		mode = freebuff.LoginMode(m)
-	}
-	if meta, ok := loose["Metadata"].(map[string]any); ok {
-		if m, ok := stringFromAny(meta["mode"]); ok {
-			mode = freebuff.LoginMode(m)
-		}
-	}
-	if meta, ok := loose["metadata"].(map[string]any); ok {
-		if m, ok := stringFromAny(meta["mode"]); ok {
-			mode = freebuff.LoginMode(m)
-		}
-	}
+	mode, proxy := resolveLoginModeAndProxy(raw)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	session, err := freebuff.StartCLILogin(ctx, mode, "")
+	session, err := freebuff.StartCLILogin(ctx, mode, proxy)
 	if err != nil {
 		return nil, fmt.Errorf("login start: %w", err)
 	}
 	// State is the fingerprint id — host passes it back on poll.
 	d.loginSessions.Store(session.FingerprintID, session)
+
+	oauthName := "Freebuff OAuth"
+	if session.Mode == freebuff.LoginModeCodebuff {
+		oauthName = "Codebuff OAuth"
+	}
 	return OkEnvelope(pluginapi.AuthLoginStartResponse{
 		Provider:  ProviderName,
 		URL:       session.LoginURL,
@@ -322,9 +312,12 @@ func (d *Dispatcher) HandleStartLogin(raw []byte) ([]byte, error) {
 		ExpiresAt: time.Now().Add(freebuff.LoginTTL).UTC(),
 		Metadata: map[string]any{
 			"mode":             string(session.Mode),
+			"oauth_name":       oauthName,
+			"name":             oauthName,
+			"label":            oauthName,
 			"fingerprint_id":   session.FingerprintID,
 			"fingerprint_hash": session.FingerprintHash,
-			"instructions":     "Open the login URL in a browser, complete auth, then wait for CPA to poll. Token is saved as freebuff.json.",
+			"instructions":     "Complete " + oauthName + " in the browser. CPA will poll until the token is ready and save freebuff.json.",
 		},
 	})
 }
@@ -335,14 +328,17 @@ func (d *Dispatcher) HandlePollLogin(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	state := strings.TrimSpace(req.State)
+	proxy := ""
 	if state == "" {
-		// Fallback loose field names.
 		var loose map[string]any
 		_ = json.Unmarshal(raw, &loose)
 		state, _ = stringFromAny(loose["state"])
 		if state == "" {
 			state, _ = stringFromAny(loose["State"])
 		}
+	}
+	if req.Host.ProxyURL != "" {
+		proxy = req.Host.ProxyURL
 	}
 	if state == "" {
 		return nil, fmt.Errorf("poll: empty state")
@@ -355,7 +351,7 @@ func (d *Dispatcher) HandlePollLogin(raw []byte) ([]byte, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	user, pending, err := freebuff.PollCLILogin(ctx, session, "")
+	user, pending, err := freebuff.PollCLILogin(ctx, session, proxy)
 	if err != nil {
 		d.loginSessions.Delete(state)
 		return OkEnvelope(pluginapi.AuthLoginPollResponse{
@@ -370,8 +366,7 @@ func (d *Dispatcher) HandlePollLogin(raw []byte) ([]byte, error) {
 		})
 	}
 
-	// Verify token against Freebuff session API before accepting.
-	vr := freebuff.VerifyToken(ctx, user.AuthToken, "")
+	vr := freebuff.VerifyToken(ctx, user.AuthToken, proxy)
 	if !vr.OK {
 		d.loginSessions.Delete(state)
 		return OkEnvelope(pluginapi.AuthLoginPollResponse{
@@ -381,11 +376,91 @@ func (d *Dispatcher) HandlePollLogin(raw []byte) ([]byte, error) {
 	}
 
 	sa := freebuff.AuthStorageFromToken(user.AuthToken, user, session.Mode)
+	if proxy != "" && sa.ProxyURL == "" {
+		sa.ProxyURL = proxy
+	}
 	d.loginSessions.Delete(state)
 	return OkEnvelope(pluginapi.AuthLoginPollResponse{
 		Status: pluginapi.AuthLoginStatusSuccess,
 		Auth:   ToAuthData(sa),
 	})
+}
+
+// resolveLoginModeAndProxy reads mode from AuthLoginStartRequest / loose JSON.
+// Supports Freebuff OAuth (default) and Codebuff OAuth via mode=codebuff.
+func resolveLoginModeAndProxy(raw []byte) (freebuff.LoginMode, string) {
+	mode := freebuff.LoginModeFreebuff
+	proxy := ""
+
+	var req pluginapi.AuthLoginStartRequest
+	if err := json.Unmarshal(raw, &req); err == nil {
+		if req.Host.ProxyURL != "" {
+			proxy = req.Host.ProxyURL
+		}
+		if req.Metadata != nil {
+			if m, ok := stringFromAny(req.Metadata["mode"]); ok {
+				mode = freebuff.LoginMode(m)
+			} else if m, ok := stringFromAny(req.Metadata["login_mode"]); ok {
+				mode = freebuff.LoginMode(m)
+			} else if m, ok := stringFromAny(req.Metadata["oauth"]); ok {
+				mode = loginModeFromOAuthLabel(m)
+			} else if m, ok := stringFromAny(req.Metadata["name"]); ok {
+				mode = loginModeFromOAuthLabel(m)
+			}
+		}
+	}
+
+	var loose map[string]any
+	_ = json.Unmarshal(raw, &loose)
+	if m, ok := stringFromAny(loose["mode"]); ok {
+		mode = freebuff.LoginMode(m)
+	}
+	if m, ok := stringFromAny(loose["login_mode"]); ok {
+		mode = freebuff.LoginMode(m)
+	}
+	if meta, ok := loose["Metadata"].(map[string]any); ok {
+		if m, ok := stringFromAny(meta["mode"]); ok {
+			mode = freebuff.LoginMode(m)
+		} else if m, ok := stringFromAny(meta["login_mode"]); ok {
+			mode = freebuff.LoginMode(m)
+		} else if m, ok := stringFromAny(meta["oauth"]); ok {
+			mode = loginModeFromOAuthLabel(m)
+		} else if m, ok := stringFromAny(meta["name"]); ok {
+			mode = loginModeFromOAuthLabel(m)
+		}
+	}
+	if meta, ok := loose["metadata"].(map[string]any); ok {
+		if m, ok := stringFromAny(meta["mode"]); ok {
+			mode = freebuff.LoginMode(m)
+		} else if m, ok := stringFromAny(meta["login_mode"]); ok {
+			mode = freebuff.LoginMode(m)
+		} else if m, ok := stringFromAny(meta["oauth"]); ok {
+			mode = loginModeFromOAuthLabel(m)
+		} else if m, ok := stringFromAny(meta["name"]); ok {
+			mode = loginModeFromOAuthLabel(m)
+		}
+	}
+	// CPA /oauth may pass provider-like labels.
+	if m, ok := stringFromAny(loose["provider"]); ok {
+		mode = loginModeFromOAuthLabel(m)
+	}
+
+	if mode != freebuff.LoginModeFreebuff && mode != freebuff.LoginModeCodebuff {
+		mode = freebuff.LoginModeFreebuff
+	}
+	return mode, proxy
+}
+
+func loginModeFromOAuthLabel(s string) freebuff.LoginMode {
+	l := strings.ToLower(strings.TrimSpace(s))
+	switch {
+	case strings.Contains(l, "codebuff"):
+		return freebuff.LoginModeCodebuff
+	case strings.Contains(l, "freebuff"):
+		return freebuff.LoginModeFreebuff
+	default:
+		return freebuff.LoginModeFreebuff
+	}
 }
 
 func stringFromAny(v any) (string, bool) {
@@ -409,6 +484,10 @@ func (d *Dispatcher) HandleRefreshAuth(raw []byte) ([]byte, error) {
 	if err != nil || len(sa.TokenList()) == 0 {
 		return nil, fmt.Errorf("refresh: invalid freebuff auth")
 	}
+	if sa.ProxyURL == "" && req.Host.ProxyURL != "" {
+		sa.ProxyURL = req.Host.ProxyURL
+	}
+	// Bearer tokens have no refresh endpoint; re-verify optionally and echo.
 	return OkEnvelope(pluginapi.AuthRefreshResponse{Auth: ToAuthData(sa)})
 }
 
@@ -582,7 +661,24 @@ func (d *Dispatcher) prepareRun(ctx context.Context, req pluginapi.ExecutorReque
 	if err != nil || len(sa.TokenList()) == 0 {
 		return nil, nil, fmt.Errorf("invalid freebuff auth storage")
 	}
-	pool, err := d.getPool(sa, "")
+	if sa.Disabled {
+		return nil, nil, fmt.Errorf("freebuff auth is disabled")
+	}
+	// Host AuthData.ProxyURL / attributes may override empty storage proxy.
+	hostProxy := ""
+	if sa.ProxyURL == "" {
+		if req.AuthAttributes != nil {
+			if p := req.AuthAttributes["proxy_url"]; p != "" {
+				hostProxy = p
+			}
+		}
+		if hostProxy == "" && req.AuthMetadata != nil {
+			if p, ok := req.AuthMetadata["proxy_url"].(string); ok {
+				hostProxy = p
+			}
+		}
+	}
+	pool, err := d.getPool(sa, hostProxy)
 	if err != nil {
 		return nil, nil, err
 	}

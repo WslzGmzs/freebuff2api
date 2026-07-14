@@ -3,6 +3,7 @@ package freebuff
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -138,7 +139,9 @@ func (c *Client) headers(jsonBody bool, userAgent string, requireAuth bool, extr
 	}
 	h := make(http.Header)
 	h.Set("Accept", "*/*")
-	h.Set("Accept-Encoding", "gzip, deflate")
+	// Do NOT set Accept-Encoding. If the client requests gzip explicitly,
+	// net/http will NOT auto-decompress and JSON parsing sees raw 0x1f gzip magic.
+	// Letting Transport negotiate keeps transparent gzip decode.
 	h.Set("Connection", "keep-alive")
 	h.Set("Host", HostHeader(c.settings.BaseURL))
 	h.Set("User-Agent", userAgent)
@@ -181,7 +184,16 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, hdr 
 		return nil, &Error{Message: fmt.Sprintf("%s %s network error: %v", method, fullURL, err), StatusCode: 502}
 	}
 	defer resp.Body.Close()
-	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	bodyReader := io.Reader(resp.Body)
+	// Defensive: if Content-Encoding is still gzip (explicit Accept-Encoding elsewhere),
+	// unwrap before JSON parse. Net/http auto-decompresses when it set Accept-Encoding itself.
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Encoding")), "gzip") {
+		if gr, err := gzip.NewReader(resp.Body); err == nil {
+			defer gr.Close()
+			bodyReader = gr
+		}
+	}
+	payload, _ := io.ReadAll(io.LimitReader(bodyReader, 4<<20))
 	if resp.StatusCode >= 400 {
 		c.maybeRecordRateLimit(resp.StatusCode, string(payload), "Codebuff request failed")
 		return nil, upstreamError(resp.StatusCode, payload, "Codebuff request failed")
@@ -189,6 +201,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, hdr 
 	if len(payload) == 0 {
 		return map[string]any{}, nil
 	}
+	payload = maybeGunzipBytes(payload)
 	var out map[string]any
 	if err := json.Unmarshal(payload, &out); err != nil {
 		return nil, &Error{Message: fmt.Sprintf("invalid JSON from %s: %v", path, err), StatusCode: 502}
@@ -744,4 +757,21 @@ func truncate(s string, n int) string {
 // UTCNowISO returns an RFC3339 milli timestamp with Z suffix.
 func UTCNowISO() string {
 	return time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+}
+
+// maybeGunzipBytes decompresses if payload starts with gzip magic 0x1f 0x8b.
+func maybeGunzipBytes(payload []byte) []byte {
+	if len(payload) < 2 || payload[0] != 0x1f || payload[1] != 0x8b {
+		return payload
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		return payload
+	}
+	defer gr.Close()
+	out, err := io.ReadAll(io.LimitReader(gr, 4<<20))
+	if err != nil || len(out) == 0 {
+		return payload
+	}
+	return out
 }

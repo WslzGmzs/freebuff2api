@@ -1,9 +1,27 @@
 {
+  "id": "freebuff-example",
+  "provider": "freebuff",
+  "type": "freebuff",
+  "label": "Freebuff OAuth",
+  "prefix": "",
+  "proxy_url": "",
+  "priority": 0,
+  "disabled": false,
   "token": "YOUR_FREEBUFF_BEARER_TOKEN",
-  "ad_providers": ["gravity", "zeroclick"],
+  "tokens": [],
   "api_base_url": "https://www.codebuff.com",
+  "zeroclick_base_url": "https://zeroclick.dev",
+  "ad_providers": ["gravity", "zeroclick"],
   "timezone": "Asia/Shanghai",
   "locale": "zh-CN",
   "os": "windows",
-  "debug": false
+  "login_mode": "freebuff",
+  "debug": false,
+  "attributes": {
+    "provider": "freebuff"
+  },
+  "metadata": {
+    "type": "freebuff",
+    "oauth": true
+  }
 }

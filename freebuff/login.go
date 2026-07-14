@@ -210,22 +210,3 @@ func VerifyToken(ctx context.Context, token, proxyURL string) VerifyResult {
 	// Other 4xx/5xx after auth often still mean the token was accepted.
 	return VerifyResult{OK: true, Info: fmt.Sprintf("HTTP %d (auth ok, endpoint returned: %s)", resp.StatusCode, truncate(string(body), 200))}
 }
-
-// AuthStorageFromToken builds a freebuff.json payload after successful login.
-func AuthStorageFromToken(token string, user *LoginUser, mode LoginMode) AuthStorage {
-	label := "Freebuff"
-	if user != nil {
-		if user.Name != "" {
-			label = user.Name
-		} else if user.Email != "" {
-			label = user.Email
-		}
-	}
-	if mode == LoginModeCodebuff {
-		label = label + " (codebuff)"
-	}
-	return AuthStorage{
-		Token: token,
-		Label: label,
-	}
-}
