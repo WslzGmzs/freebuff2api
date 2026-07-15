@@ -90,23 +90,39 @@ CPA 根据各库的 `auth.identifier` 暴露 OAuth 入口（对应
 
 也可手动粘贴 token（见 `auth/freebuff.example.json`、`auth/codebuff.example.json`）。
 
-## 凭据 `freebuff.json`（CPA 标准字段 + Freebuff 扩展）
+## 凭据 `freebuff.json` / `codebuff.json`（CPA 标准字段 + Freebuff 扩展）
 
-完整示例：`auth/freebuff.example.json`。
+完整示例：`auth/freebuff.example.json`、`auth/codebuff.example.json`。
 
-**主机标准字段**（`pluginapi.AuthData` / CPA `Auth`）：
+**主机标准字段**（`pluginapi.AuthData` / CPA `Auth`，对齐 workbuddy-cli-proxy）：
 
 | 字段 | 说明 |
 |------|------|
-| `id` | 稳定凭据 ID |
-| `provider` | 固定 `freebuff` |
+| `id` | 稳定凭据 ID（`freebuff-` / `codebuff-` 前缀） |
+| `provider` | 固定 `freebuff`（执行路由） |
 | `label` | 展示名（如 `Freebuff OAuth`） |
 | `prefix` | 模型前缀命名空间 |
 | `proxy_url` | 该凭据上游代理（覆盖全局；空则直连） |
 | `priority` | 调度优先级（写入 attributes/metadata） |
-| `disabled` | 禁用 |
-| `attributes` | 不可变路由属性 |
-| `metadata` | 可变元数据 |
+| `disabled` | 禁用后：不出现模型、execute 返回 `auth_disabled` |
+| `excluded_models` | 该凭据隐藏的模型 id（也支持 `excluded-models`） |
+| `model_aliases` | CPA 模型别名 `[{name,alias,force-mapping}]`（也支持 `model-aliases`） |
+| `attributes` | 含 `auth_kind=oauth`、`excluded_models`、`model_aliases` 等 |
+| `metadata` | 含 `disabled` / 排除 / 别名（供 CPA 主机合并） |
+
+模型范围：`ExecutorModelScope=oauth`，`model.static` 为空；仅 **启用中的凭据** 经 `model.for_auth` 挂模型。全部禁用后 `/v1/models` 不再出现 freebuff 模型。
+
+也可在 CPA `config.yaml` 使用全局：
+
+```yaml
+oauth-model-alias:
+  freebuff:
+    - name: deepseek/deepseek-v4-flash
+      alias: ds-flash
+oauth-excluded-models:
+  freebuff:
+    - mimo/mimo-v2.5
+```
 
 **Freebuff 扩展：**
 

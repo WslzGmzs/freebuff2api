@@ -139,17 +139,15 @@ func (d *Dispatcher) Handle(method string, request []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
 		return OkEnvelope(d.Registration())
-	case pluginabi.MethodModelStatic, pluginabi.MethodModelForAuth:
-		if IsCodebuffIdentity() {
-			// Codebuff face is auth-only; avoid duplicate model registration.
-			return OkEnvelope(pluginapi.ModelResponse{Provider: RuntimeProvider, Models: nil})
-		}
-		return OkEnvelope(pluginapi.ModelResponse{Provider: RuntimeProvider, Models: d.Models()})
+	case pluginabi.MethodModelStatic:
+		// OAuth scope: static listing is empty so disabled/no-auth installs do
+		// not keep advertising freebuff models (workbuddy-cli-proxy pattern).
+		return OkEnvelope(pluginapi.ModelResponse{Provider: RuntimeProvider, Models: nil})
+	case pluginabi.MethodModelForAuth:
+		return d.HandleModelsForAuth(request)
 	case pluginabi.MethodModelRegister:
-		if IsCodebuffIdentity() {
-			return OkEnvelope(pluginapi.ModelRegistrationResponse{Provider: RuntimeProvider, Models: nil})
-		}
-		return OkEnvelope(pluginapi.ModelRegistrationResponse{Provider: RuntimeProvider, Models: d.Models()})
+		// Development-time registrar still empty; live models come via for_auth.
+		return OkEnvelope(pluginapi.ModelRegistrationResponse{Provider: RuntimeProvider, Models: nil})
 	case pluginabi.MethodAuthIdentifier:
 		return OkEnvelope(IdentifierResponse{Identifier: id})
 	case pluginabi.MethodAuthParse:
@@ -237,7 +235,9 @@ func (d *Dispatcher) Registration() Registration {
 	if !IsCodebuffIdentity() {
 		caps.ModelProvider = true
 		caps.Executor = true
-		caps.ExecutorModelScope = pluginapi.ExecutorModelScopeBoth
+		// OAuth/auth-bound only: models appear when a non-disabled auth is loaded.
+		// Static listing is empty so disabling all freebuff auths drops models from /v1/models.
+		caps.ExecutorModelScope = pluginapi.ExecutorModelScopeOAuth
 		caps.ExecutorInputFormats = []string{"chat-completions"}
 		caps.ExecutorOutputFormats = []string{"chat-completions"}
 		fields = append(fields, pluginapi.ConfigField{
@@ -284,9 +284,13 @@ func (d *Dispatcher) ActiveModels() []freebuff.Model {
 }
 
 func (d *Dispatcher) Models() []pluginapi.ModelInfo {
+	return d.ModelsFrom(d.ActiveModels())
+}
+
+// ModelsFrom converts domain models to pluginapi.ModelInfo (with bare-suffix aliases).
+func (d *Dispatcher) ModelsFrom(models []freebuff.Model) []pluginapi.ModelInfo {
 	const maxCompletionTokens int64 = 8192
 	const contextLength int64 = 200000
-	models := d.ActiveModels()
 	out := make([]pluginapi.ModelInfo, 0, len(models)*2)
 	seen := map[string]struct{}{}
 	add := func(id, owned, display string) {
@@ -309,7 +313,7 @@ func (d *Dispatcher) Models() []pluginapi.ModelInfo {
 	for _, m := range models {
 		owned := m.OwnedBy
 		if owned == "" {
-			owned = ProviderName
+			owned = RuntimeProvider
 		}
 		display := m.DisplayName
 		if display == "" {
@@ -319,6 +323,89 @@ func (d *Dispatcher) Models() []pluginapi.ModelInfo {
 		if i := strings.LastIndex(m.ID, "/"); i >= 0 {
 			add(m.ID[i+1:], owned, display)
 		}
+	}
+	return out
+}
+
+// HandleModelsForAuth returns models bound to one credential (oauth scope).
+// Disabled or missing auth → empty list (models disappear from /v1/models).
+func (d *Dispatcher) HandleModelsForAuth(raw []byte) ([]byte, error) {
+	if IsCodebuffIdentity() {
+		return OkEnvelope(pluginapi.ModelResponse{Provider: RuntimeProvider, Models: nil})
+	}
+	storage, meta, attrs := extractAuthMaterial(raw)
+	if len(storage) == 0 {
+		return OkEnvelope(pluginapi.ModelResponse{Provider: RuntimeProvider, Models: nil})
+	}
+	sa, err := freebuff.ParseAuthStorage(storage)
+	if err != nil || len(sa.TokenList()) == 0 {
+		return OkEnvelope(pluginapi.ModelResponse{Provider: RuntimeProvider, Models: nil})
+	}
+	freebuff.ApplyHostCredentialFields(&sa, meta, attrs)
+	if sa.Disabled {
+		return OkEnvelope(pluginapi.ModelResponse{Provider: RuntimeProvider, Models: nil})
+	}
+	models := freebuff.FilterModelsByExcluded(d.ActiveModels(), sa.ExcludedModels)
+	return OkEnvelope(pluginapi.ModelResponse{Provider: RuntimeProvider, Models: d.ModelsFrom(models)})
+}
+
+// extractAuthMaterial pulls StorageJSON + host Metadata/Attributes from model.for_auth
+// or executor requests (field names vary by host encoding).
+func extractAuthMaterial(raw []byte) (storage []byte, meta map[string]any, attrs map[string]string) {
+	var req pluginapi.AuthModelRequest
+	if err := json.Unmarshal(raw, &req); err == nil {
+		if len(req.StorageJSON) > 0 {
+			storage = req.StorageJSON
+		}
+		meta = req.Metadata
+		attrs = req.Attributes
+	}
+	if len(storage) == 0 || meta == nil || attrs == nil {
+		var loose map[string]any
+		if json.Unmarshal(raw, &loose) == nil {
+			if meta == nil {
+				if m, ok := loose["Metadata"].(map[string]any); ok {
+					meta = m
+				} else if m, ok := loose["metadata"].(map[string]any); ok {
+					meta = m
+				}
+			}
+			if attrs == nil {
+				if a, ok := loose["Attributes"].(map[string]any); ok {
+					attrs = stringMapFromAnyMap(a)
+				} else if a, ok := loose["attributes"].(map[string]any); ok {
+					attrs = stringMapFromAnyMap(a)
+				}
+			}
+			if len(storage) == 0 {
+				for _, key := range []string{"StorageJSON", "storage_json", "storageJSON"} {
+					switch v := loose[key].(type) {
+					case string:
+						if v != "" {
+							storage = []byte(v)
+						}
+					case []byte:
+						storage = v
+					}
+				}
+			}
+		}
+	}
+	return storage, meta, attrs
+}
+
+func stringMapFromAnyMap(in map[string]any) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -349,6 +436,8 @@ func (d *Dispatcher) HandleParseAuth(raw []byte) ([]byte, error) {
 	if sa.ProxyURL == "" && req.Host.ProxyURL != "" {
 		sa.ProxyURL = req.Host.ProxyURL
 	}
+	// Host may pass panel fields only in request envelope; storage already has
+	// disabled / excluded_models / model_aliases when present in RawJSON.
 	return OkEnvelope(pluginapi.AuthParseResponse{
 		Handled: true,
 		Auth:    ToAuthData(sa),
@@ -413,22 +502,15 @@ func credentialFileName(sa freebuff.AuthStorage) string {
 // ToAuthData maps freebuff.json / codebuff.json (+ host fields) onto pluginapi.AuthData.
 // Provider is always RuntimeProvider (freebuff) so chat uses freebuff executor.
 // FileName / ID stay namespaced so Freebuff and Codebuff OAuth never overwrite each other.
+// Writes disabled / excluded_models / model_aliases into Metadata + Attributes for CPA host.
 func ToAuthData(sa freebuff.AuthStorage) pluginapi.AuthData {
 	sa.Normalize()
-	// StorageJSON keeps Freebuff-owned fields; host also gets standard AuthData fields.
+	// Avoid writing hyphen-only aliases into storage (canonical snake_case).
+	sa.ExcludedModelsHyphen = nil
+	sa.ModelAliasesHyphen = nil
 	storage, _ := json.Marshal(sa)
 	fileName := credentialFileName(sa)
-	if sa.Metadata == nil {
-		sa.Metadata = map[string]any{}
-	}
-	sa.Metadata["type"] = RuntimeProvider
-	sa.Metadata["login_mode"] = sa.LoginMode
-	sa.Metadata["credential_source"] = sa.CredentialSource()
-	if sa.Attributes == nil {
-		sa.Attributes = map[string]string{}
-	}
-	sa.Attributes["credential_source"] = sa.CredentialSource()
-	sa.Attributes["login_mode"] = sa.LoginMode
+	// Normalize already populated Metadata/Attributes with CPA policy fields.
 	return pluginapi.AuthData{
 		// Always freebuff so model/executor routing hits freebuff.*.
 		Provider:    RuntimeProvider,
@@ -537,6 +619,8 @@ func (d *Dispatcher) HandlePollLogin(raw []byte) ([]byte, error) {
 	if proxy != "" && sa.ProxyURL == "" {
 		sa.ProxyURL = proxy
 	}
+	// Preserve host panel fields if CPA sent them on the poll request (rare).
+	freebuff.ApplyHostCredentialFields(&sa, req.Metadata, nil)
 	d.loginSessions.Delete(state)
 	return OkEnvelope(pluginapi.AuthLoginPollResponse{
 		Status: pluginapi.AuthLoginStatusSuccess,
@@ -653,6 +737,7 @@ func (d *Dispatcher) HandleRefreshAuth(raw []byte) ([]byte, error) {
 	if err != nil || len(sa.TokenList()) == 0 {
 		return nil, fmt.Errorf("refresh: invalid freebuff auth")
 	}
+	freebuff.ApplyHostCredentialFields(&sa, req.Metadata, req.Attributes)
 	if sa.ProxyURL == "" && req.Host.ProxyURL != "" {
 		sa.ProxyURL = req.Host.ProxyURL
 	}
@@ -830,8 +915,14 @@ func (d *Dispatcher) prepareRun(ctx context.Context, req pluginapi.ExecutorReque
 	if err != nil || len(sa.TokenList()) == 0 {
 		return nil, nil, fmt.Errorf("invalid freebuff auth storage")
 	}
+	// Merge host panel fields (disabled / excluded_models / proxy / prefix).
+	freebuff.ApplyHostCredentialFields(&sa, req.AuthMetadata, req.AuthAttributes)
+	// Also merge top-level Metadata if host only put fields there.
+	if req.Metadata != nil {
+		freebuff.ApplyHostCredentialFields(&sa, req.Metadata, nil)
+	}
 	if sa.Disabled {
-		return nil, nil, fmt.Errorf("freebuff auth is disabled")
+		return nil, nil, fmt.Errorf("auth_disabled: freebuff credential is disabled")
 	}
 	// Host AuthData.ProxyURL / attributes may override empty storage proxy.
 	hostProxy := ""
@@ -847,6 +938,9 @@ func (d *Dispatcher) prepareRun(ctx context.Context, req pluginapi.ExecutorReque
 			}
 		}
 	}
+	if sa.ProxyURL != "" {
+		hostProxy = sa.ProxyURL
+	}
 	pool, err := d.getPool(sa, hostProxy)
 	if err != nil {
 		return nil, nil, err
@@ -860,12 +954,27 @@ func (d *Dispatcher) prepareRun(ctx context.Context, req pluginapi.ExecutorReque
 	if requested == "" {
 		requested, _ = body["model"].(string)
 	}
-	model, ok := freebuff.ResolveModel(requested, d.ActiveModels())
+	// Defense in depth: reject excluded models even if host registry was stale.
+	if err := freebuff.EnsureModelAllowed(requested, sa); err != nil {
+		return nil, nil, err
+	}
+	active := freebuff.FilterModelsByExcluded(d.ActiveModels(), sa.ExcludedModels)
+	model, ok := freebuff.ResolveModel(requested, active)
 	if !ok {
-		model = freebuff.Model{
-			ID:          requested,
-			AgentID:     freebuff.MapModelToAgentID(requested),
-			DisplayName: freebuff.DeriveDisplayName(requested),
+		// Still allow resolve against full list for aliases, then re-check exclude.
+		model, ok = freebuff.ResolveModel(requested, d.ActiveModels())
+		if !ok {
+			model = freebuff.Model{
+				ID:          requested,
+				AgentID:     freebuff.MapModelToAgentID(requested),
+				DisplayName: freebuff.DeriveDisplayName(requested),
+			}
+		}
+		if err := freebuff.EnsureModelAllowed(model.ID, sa); err != nil {
+			return nil, nil, err
+		}
+		if err := freebuff.EnsureModelAllowed(model.UpstreamID(), sa); err != nil {
+			return nil, nil, err
 		}
 	}
 	displayModel := requested

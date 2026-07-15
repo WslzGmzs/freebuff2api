@@ -7,6 +7,7 @@ import (
 
 	"github.com/WslzGmzs/freebuff2api/freebuff"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestRegisterEnvelopeFreebuff(t *testing.T) {
@@ -33,6 +34,9 @@ func TestRegisterEnvelopeFreebuff(t *testing.T) {
 	}
 	if !reg.Capabilities.ModelProvider || !reg.Capabilities.AuthProvider || !reg.Capabilities.Executor {
 		t.Fatalf("capabilities: %+v", reg.Capabilities)
+	}
+	if reg.Capabilities.ExecutorModelScope != pluginapi.ExecutorModelScopeOAuth {
+		t.Fatalf("scope=%v want oauth", reg.Capabilities.ExecutorModelScope)
 	}
 }
 
@@ -88,7 +92,7 @@ func TestAuthIdentifierRPC(t *testing.T) {
 	}
 }
 
-func TestModelStaticListsModels(t *testing.T) {
+func TestModelStaticIsEmptyOAuthScope(t *testing.T) {
 	Identity = IdentityFreebuff
 	d := NewDispatcher(NopHost{})
 	raw, err := d.Handle(pluginabi.MethodModelStatic, nil)
@@ -105,8 +109,8 @@ func TestModelStaticListsModels(t *testing.T) {
 	if models == nil {
 		models, _ = m["models"].([]any)
 	}
-	if len(models) < 5 {
-		t.Fatalf("expected many models, got %d", len(models))
+	if len(models) != 0 {
+		t.Fatalf("static models must be empty under oauth scope, got %d", len(models))
 	}
 }
 

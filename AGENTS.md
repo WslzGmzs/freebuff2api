@@ -55,9 +55,18 @@ Poll success always sets `AuthData.Provider=freebuff` so the freebuff executor h
 
 ## Credential rules
 
-Parse top-level CPA fields into `AuthData`: `id`, `provider`, `prefix`, `label`, `proxy_url`, `priority`, `disabled`, `attributes`, `metadata`.  
+Parse top-level CPA fields into `AuthData`: `id`, `provider`, `prefix`, `label`, `proxy_url`, `priority`, `disabled`, `excluded_models`, `model_aliases`, `attributes`, `metadata`.  
 Freebuff secrets stay in `StorageJSON` (`token`/`tokens`/…).  
-Executor honors `disabled` and merges host `proxy_url` when storage empty.
+Write-through to host: `Metadata`/`Attributes` get `disabled`, `excluded_models`, `model_aliases`, `auth_kind=oauth` (same pattern as workbuddy-cli-proxy).
+
+### Model scope (OAuth-bound)
+
+| API | Behavior |
+|-----|----------|
+| `ExecutorModelScope` | **`oauth`** (not both) |
+| `model.static` | **empty** |
+| `model.for_auth` | disabled / no storage → empty; else full list minus `excluded_models` |
+| `execute` / `stream` | `disabled` → `auth_disabled`; excluded model → `model_excluded` |
 
 ## Architecture
 
@@ -65,7 +74,8 @@ Executor honors `disabled` and merges host `proxy_url` when storage empty.
 2. Sessions model-bound; Gemini free → MiMo.  
 3. Multi-token pool; strip non-function tools.  
 4. Never set manual `Accept-Encoding: gzip` (breaks JSON with `\x1f`).  
-5. Chat-completions executor only.
+5. Chat-completions executor only.  
+6. Credential disable / model exclude / aliases follow workbuddy-cli-proxy.
 
 ## Release
 

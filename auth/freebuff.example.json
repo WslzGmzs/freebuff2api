@@ -7,6 +7,8 @@
   "proxy_url": "",
   "priority": 0,
   "disabled": false,
+  "excluded_models": [],
+  "model_aliases": [],
   "token": "YOUR_FREEBUFF_BEARER_TOKEN",
   "tokens": [],
   "api_base_url": "https://www.codebuff.com",
@@ -20,7 +22,8 @@
   "attributes": {
     "provider": "freebuff",
     "login_mode": "freebuff",
-    "credential_source": "freebuff"
+    "credential_source": "freebuff",
+    "auth_kind": "oauth"
   },
   "metadata": {
     "type": "freebuff",
