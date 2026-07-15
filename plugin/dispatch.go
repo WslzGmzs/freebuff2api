@@ -184,9 +184,12 @@ type Envelope struct {
 	Error  *EnvelopeError  `json:"error,omitempty"`
 }
 
+// EnvelopeError is decoded by CPA decodeEnvelopeResult; http_status drives MarkResult cooldown/rotation.
 type EnvelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 type IdentifierResponse struct {
@@ -777,11 +780,50 @@ func (d *Dispatcher) HandleExecStream(raw []byte) ([]byte, error) {
 		return OkEnvelope(StreamResponse{Headers: headers, Chunks: chunks})
 	}
 
+	// Open upstream *before* returning so 401/402/429 reach the host as
+	// execute_stream errors (with http_status). That lets CPA MarkResult cool
+	// down / rotate credentials. Mid-stream failures still go via emit.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	prepared, cleanup, err := d.prepareRun(ctx, req.ExecutorRequest)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	stream, err := prepared.client.OpenChatStream(ctx, prepared.payload)
+	if err != nil {
+		cleanup()
+		cancel()
+		return nil, err
+	}
+
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		if err := d.runStreamAsync(ctx, req.ExecutorRequest, req.StreamID, sseFramed); err != nil {
-			d.Host.StreamEmitError(req.StreamID, err.Error())
+		defer cleanup()
+		defer stream.Body.Close()
+		var messageID string
+		pumpErr := freebuff.PumpChatStream(stream.Body, func(ev freebuff.ChatEvent) error {
+			if ev.Done || ev.Object == nil {
+				return nil
+			}
+			if id, ok := ev.Object["id"].(string); ok && id != "" {
+				messageID = id
+			}
+			clean := freebuff.SanitizeStreamChunk(ev.Object)
+			if clean == nil {
+				return nil
+			}
+			payload, err := json.Marshal(clean)
+			if err != nil {
+				return nil
+			}
+			if sseFramed {
+				payload = append([]byte("data: "), payload...)
+			}
+			return d.Host.StreamEmit(req.StreamID, payload)
+		})
+		freebuff.FinalizeRun(context.Background(), prepared.client, prepared.run, messageID)
+		if pumpErr != nil {
+			d.Host.StreamEmitError(req.StreamID, pumpErr.Error())
 		}
 		d.Host.StreamClose(req.StreamID)
 	}()
@@ -871,38 +913,6 @@ func (d *Dispatcher) runStreamSync(req pluginapi.ExecutorRequest, sseFramed bool
 	return chunks, nil
 }
 
-func (d *Dispatcher) runStreamAsync(ctx context.Context, req pluginapi.ExecutorRequest, streamID string, sseFramed bool) error {
-	prepared, cleanup, err := d.prepareRun(ctx, req)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	var messageID string
-	err = prepared.client.ChatEvents(ctx, prepared.payload, func(ev freebuff.ChatEvent) error {
-		if ev.Done || ev.Object == nil {
-			return nil
-		}
-		if id, ok := ev.Object["id"].(string); ok && id != "" {
-			messageID = id
-		}
-		clean := freebuff.SanitizeStreamChunk(ev.Object)
-		if clean == nil {
-			return nil
-		}
-		payload, err := json.Marshal(clean)
-		if err != nil {
-			return nil
-		}
-		if sseFramed {
-			payload = append([]byte("data: "), payload...)
-		}
-		return d.Host.StreamEmit(streamID, payload)
-	})
-	freebuff.FinalizeRun(context.Background(), prepared.client, prepared.run, messageID)
-	return err
-}
-
 type preparedExec struct {
 	client       *freebuff.Client
 	run          freebuff.Run
@@ -922,7 +932,11 @@ func (d *Dispatcher) prepareRun(ctx context.Context, req pluginapi.ExecutorReque
 		freebuff.ApplyHostCredentialFields(&sa, req.Metadata, nil)
 	}
 	if sa.Disabled {
-		return nil, nil, fmt.Errorf("auth_disabled: freebuff credential is disabled")
+		return nil, nil, &freebuff.Error{
+			Message:    "auth_disabled: freebuff credential is disabled",
+			HTTPStatus: http.StatusForbidden,
+			Code:       "auth_disabled",
+		}
 	}
 	// Host AuthData.ProxyURL / attributes may override empty storage proxy.
 	hostProxy := ""
@@ -1064,6 +1078,75 @@ func OkEnvelope(v any) ([]byte, error) {
 }
 
 func ErrorEnvelope(code, message string) []byte {
-	raw, _ := json.Marshal(Envelope{OK: false, Error: &EnvelopeError{Code: code, Message: message}})
+	return ErrorEnvelopeStatus(code, message, 0)
+}
+
+// ErrorEnvelopeStatus builds a failed envelope; httpStatus is read by CPA for auth cooldown.
+func ErrorEnvelopeStatus(code, message string, httpStatus int) []byte {
+	err := &EnvelopeError{Code: code, Message: message, HTTPStatus: httpStatus}
+	if httpStatus == http.StatusTooManyRequests || httpStatus == http.StatusRequestTimeout || httpStatus >= 500 {
+		err.Retryable = true
+	}
+	raw, _ := json.Marshal(Envelope{OK: false, Error: err})
+	return raw
+}
+
+// ErrorEnvelopeFromErr preserves StatusCode/RetryAfter for CPA MarkResult.
+func ErrorEnvelopeFromErr(err error) []byte {
+	if err == nil {
+		return ErrorEnvelopeStatus("plugin_error", "plugin call failed", 0)
+	}
+	type statusCoder interface {
+		StatusCode() int
+	}
+	code := "plugin_error"
+	status := 0
+	retryable := false
+	message := err.Error()
+
+	if fe, ok := err.(*freebuff.Error); ok && fe != nil {
+		if fe.Code != "" {
+			code = fe.Code
+		}
+		status = fe.HTTPStatus
+		retryable = fe.Retryable
+		message = fe.Message
+	} else if sc, ok := err.(statusCoder); ok && sc != nil {
+		status = sc.StatusCode()
+		// Map common plugin errors.
+		switch {
+		case strings.Contains(message, "auth_disabled"):
+			code = "auth_disabled"
+			if status == 0 {
+				status = http.StatusForbidden
+			}
+		case strings.Contains(message, "model_excluded"):
+			code = "model_excluded"
+			if status == 0 {
+				status = http.StatusBadRequest
+			}
+		default:
+			code = "upstream_error"
+		}
+	} else {
+		switch {
+		case strings.Contains(message, "auth_disabled"):
+			code = "auth_disabled"
+			status = http.StatusForbidden
+		case strings.Contains(message, "model_excluded"):
+			code = "model_excluded"
+			status = http.StatusBadRequest
+		case strings.Contains(message, "429"):
+			code = "upstream_error"
+			status = http.StatusTooManyRequests
+			retryable = true
+		}
+	}
+
+	envErr := &EnvelopeError{Code: code, Message: message, HTTPStatus: status, Retryable: retryable}
+	if !envErr.Retryable && (status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status >= 500) {
+		envErr.Retryable = true
+	}
+	raw, _ := json.Marshal(Envelope{OK: false, Error: envErr})
 	return raw
 }

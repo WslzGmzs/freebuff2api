@@ -33,7 +33,7 @@ func (m *SessionManager) AcquireSession(ctx context.Context, model string, messa
 
 func (m *SessionManager) ensureLocked(ctx context.Context, model string, messages []map[string]any) (Session, error) {
 	if rl, ok := m.client.CachedRateLimit(model); ok {
-		return Session{}, &Error{Message: rl.FormatError(), StatusCode: 429}
+		return Session{}, rl.AsError()
 	}
 
 	if cached, ok := m.cache[model]; ok && cached.IsFresh() {
@@ -143,7 +143,7 @@ func (l *AccountLease) Release() {
 func NewAccountPool(storage AuthStorage, hostProxy string) (*AccountPool, error) {
 	tokens := storage.TokenList()
 	if len(tokens) == 0 {
-		return nil, &Error{Message: "freebuff auth has no token", StatusCode: 401}
+		return nil, &Error{Message: "freebuff auth has no token", HTTPStatus: 401}
 	}
 	p := &AccountPool{}
 	p.cond = sync.NewCond(&p.mu)

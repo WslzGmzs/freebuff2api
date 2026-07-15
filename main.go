@@ -101,7 +101,8 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	}
 	out, err := ensureDispatcher().Handle(methodName, req)
 	if err != nil {
-		out = plugin.ErrorEnvelope("plugin_error", err.Error())
+		// Preserve HTTP status so CPA MarkResult can cool down / rotate auths on 401/402/429.
+		out = plugin.ErrorEnvelopeFromErr(err)
 	}
 	writeResponse(response, out)
 	return 0

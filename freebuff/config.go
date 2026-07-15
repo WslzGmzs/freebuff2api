@@ -658,12 +658,13 @@ func EnsureModelAllowed(modelID string, sa AuthStorage) error {
 		bare = bare[i+1:]
 	}
 	for _, ex := range sa.ExcludedModels {
-		if strings.EqualFold(modelID, ex) || strings.EqualFold(bare, ex) {
-			return fmt.Errorf("model_excluded: %s is excluded on this freebuff credential", modelID)
-		}
-		// Allow excluding full upstream ids like deepseek/deepseek-v4-flash.
-		if strings.EqualFold(modelID, ex) || strings.HasSuffix(strings.ToLower(modelID), "/"+strings.ToLower(ex)) {
-			return fmt.Errorf("model_excluded: %s is excluded on this freebuff credential", modelID)
+		if strings.EqualFold(modelID, ex) || strings.EqualFold(bare, ex) ||
+			strings.HasSuffix(strings.ToLower(modelID), "/"+strings.ToLower(ex)) {
+			return &Error{
+				Message:    fmt.Sprintf("model_excluded: %s is excluded on this freebuff credential", modelID),
+				HTTPStatus: 400,
+				Code:       "model_excluded",
+			}
 		}
 	}
 	return nil

@@ -11,15 +11,22 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 // Error is a Freebuff/Codebuff upstream failure.
+//
+// Implements CPA StatusCode() / RetryAfter() so the host MarkResult path can
+// cool down and rotate credentials on 401/402/429 (same pattern as workbuddy).
 type Error struct {
 	Message    string
-	StatusCode int
+	HTTPStatus int
+	Code       string // optional RPC error code (e.g. upstream_error)
+	Retryable  bool
+	retryAfter *time.Duration
 }
 
 func (e *Error) Error() string {
@@ -27,6 +34,35 @@ func (e *Error) Error() string {
 		return "freebuff error"
 	}
 	return e.Message
+}
+
+// StatusCode is the method CPA cliproxyexecutor.StatusError looks for.
+func (e *Error) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.HTTPStatus
+}
+
+// RetryAfter is the method CPA retryAfterFromError looks for.
+func (e *Error) RetryAfter() *time.Duration {
+	if e == nil {
+		return nil
+	}
+	return e.retryAfter
+}
+
+// WithRetryAfter sets a cooldown duration for host scheduling.
+func (e *Error) WithRetryAfter(d time.Duration) *Error {
+	if e == nil {
+		return nil
+	}
+	if d < 0 {
+		d = 0
+	}
+	e.retryAfter = &d
+	e.Retryable = true
+	return e
 }
 
 // Session is an active Freebuff free session.
@@ -84,6 +120,30 @@ func (r RateLimit) FormatError() string {
 	return fmt.Sprintf("%s: 429 %s", prefix, r.RawBody)
 }
 
+// AsError returns a StatusError the CPA host can use for auth cooldown / rotation.
+func (r RateLimit) AsError() *Error {
+	err := &Error{
+		Message:    r.FormatError(),
+		HTTPStatus: http.StatusTooManyRequests,
+		Code:       "upstream_error",
+		Retryable:  true,
+	}
+	if !r.ResetAt.IsZero() {
+		d := time.Until(r.ResetAt.UTC())
+		if d < time.Second {
+			d = time.Second
+		}
+		err.retryAfter = &d
+	} else if r.RetryAfterMs > 0 {
+		d := time.Duration(r.RetryAfterMs) * time.Millisecond
+		err.retryAfter = &d
+	} else {
+		d := 30 * time.Minute
+		err.retryAfter = &d
+	}
+	return err
+}
+
 // Client talks to Codebuff Freebuff HTTP APIs for one token.
 type Client struct {
 	settings Settings
@@ -135,7 +195,7 @@ func (c *Client) headers(jsonBody bool, userAgent string, requireAuth bool, extr
 		userAgent = JSONUserAgent
 	}
 	if requireAuth && strings.TrimSpace(c.settings.Token) == "" {
-		return nil, &Error{Message: "FREEBUFF_TOKEN is required", StatusCode: 500}
+		return nil, &Error{Message: "FREEBUFF_TOKEN is required", HTTPStatus: 500}
 	}
 	h := make(http.Header)
 	h.Set("Accept", "*/*")
@@ -181,7 +241,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, hdr 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, &Error{Message: fmt.Sprintf("%s %s network error: %v", method, fullURL, err), StatusCode: 502}
+		return nil, &Error{Message: fmt.Sprintf("%s %s network error: %v", method, fullURL, err), HTTPStatus: 502}
 	}
 	defer resp.Body.Close()
 	bodyReader := io.Reader(resp.Body)
@@ -196,7 +256,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, hdr 
 	payload, _ := io.ReadAll(io.LimitReader(bodyReader, 4<<20))
 	if resp.StatusCode >= 400 {
 		c.maybeRecordRateLimit(resp.StatusCode, string(payload), "Codebuff request failed")
-		return nil, upstreamError(resp.StatusCode, payload, "Codebuff request failed")
+		return nil, upstreamError(resp.StatusCode, payload, resp.Header, "Codebuff request failed")
 	}
 	if len(payload) == 0 {
 		return map[string]any{}, nil
@@ -204,7 +264,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, hdr 
 	payload = maybeGunzipBytes(payload)
 	var out map[string]any
 	if err := json.Unmarshal(payload, &out); err != nil {
-		return nil, &Error{Message: fmt.Sprintf("invalid JSON from %s: %v", path, err), StatusCode: 502}
+		return nil, &Error{Message: fmt.Sprintf("invalid JSON from %s: %v", path, err), HTTPStatus: 502}
 	}
 	return out, nil
 }
@@ -314,7 +374,7 @@ func sessionFromData(data map[string]any, model, instanceID string) (Session, er
 		resolved = instanceID
 	}
 	if stringField(data, "status") != "active" || resolved == "" {
-		return Session{}, &Error{Message: fmt.Sprintf("Freebuff session is not active: %v", data), StatusCode: 502}
+		return Session{}, &Error{Message: fmt.Sprintf("Freebuff session is not active: %v", data), HTTPStatus: 502}
 	}
 	s := Session{
 		InstanceID: resolved,
@@ -331,7 +391,7 @@ func sessionFromData(data map[string]any, model, instanceID string) (Session, er
 func (c *Client) waitForActiveSession(ctx context.Context, data map[string]any, model string) (Session, error) {
 	instanceID := stringField(data, "instanceId")
 	if instanceID == "" {
-		return Session{}, &Error{Message: fmt.Sprintf("Freebuff queued session id missing: %v", data), StatusCode: 502}
+		return Session{}, &Error{Message: fmt.Sprintf("Freebuff queued session id missing: %v", data), HTTPStatus: 502}
 	}
 	deadline := time.Now().Add(c.settings.Timeout)
 	if c.settings.Timeout <= 0 {
@@ -340,7 +400,7 @@ func (c *Client) waitForActiveSession(ctx context.Context, data map[string]any, 
 	attempts := 0
 	for stringField(data, "status") == "queued" {
 		if time.Now().After(deadline) {
-			return Session{}, &Error{Message: fmt.Sprintf("Freebuff session did not become active before timeout: %v", data), StatusCode: 502}
+			return Session{}, &Error{Message: fmt.Sprintf("Freebuff session did not become active before timeout: %v", data), HTTPStatus: 502}
 		}
 		if attempts > 0 {
 			select {
@@ -449,12 +509,12 @@ func (c *Client) ReportZeroClickImpressions(ctx context.Context, ids []string) e
 	req.Header.Set("User-Agent", JSONUserAgent)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return &Error{Message: fmt.Sprintf("zeroclick network error: %v", err), StatusCode: 502}
+		return &Error{Message: fmt.Sprintf("zeroclick network error: %v", err), HTTPStatus: 502}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return &Error{Message: fmt.Sprintf("Zeroclick impression failed: %d %s", resp.StatusCode, truncate(string(body), 500)), StatusCode: 502}
+		return &Error{Message: fmt.Sprintf("Zeroclick impression failed: %d %s", resp.StatusCode, truncate(string(body), 500)), HTTPStatus: 502}
 	}
 	return nil
 }
@@ -494,7 +554,7 @@ func (c *Client) StartRun(ctx context.Context, agentID string, ancestorRunIDs []
 	}
 	runID := stringField(data, "runId")
 	if runID == "" {
-		return "", &Error{Message: fmt.Sprintf("Codebuff run id missing: %v", data), StatusCode: 502}
+		return "", &Error{Message: fmt.Sprintf("Codebuff run id missing: %v", data), HTTPStatus: 502}
 	}
 	return runID, nil
 }
@@ -572,15 +632,64 @@ func (c *Client) ChatEvents(ctx context.Context, payload map[string]any, handle 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return &Error{Message: fmt.Sprintf("POST %s network error: %v", fullURL, err), StatusCode: 502}
+		return &Error{Message: fmt.Sprintf("POST %s network error: %v", fullURL, err), HTTPStatus: 502}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
 		c.maybeRecordRateLimit(resp.StatusCode, string(body), "Codebuff chat failed")
-		return upstreamError(resp.StatusCode, body, "Codebuff chat failed")
+		return upstreamError(resp.StatusCode, body, resp.Header, "Codebuff chat failed")
 	}
 	return scanSSE(resp.Body, handle)
+}
+
+// ChatStream is an open upstream chat SSE response (status already 2xx).
+type ChatStream struct {
+	Body   io.ReadCloser
+	Header http.Header
+}
+
+// OpenChatStream POSTs chat completions and returns the body only after a
+// successful status. 4xx/429 are returned synchronously so CPA execute_stream
+// can cool down / rotate credentials (async mid-stream errors cannot).
+func (c *Client) OpenChatStream(ctx context.Context, payload map[string]any) (*ChatStream, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	fullURL := c.settings.BaseURL + "/api/v1/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	hdr, err := c.headers(true, ChatUserAgent, true, nil)
+	if err != nil {
+		return nil, err
+	}
+	for k, vals := range hdr {
+		for _, v := range vals {
+			req.Header.Add(k, v)
+		}
+	}
+	req.Host = HostHeader(c.settings.BaseURL)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, &Error{Message: fmt.Sprintf("POST %s network error: %v", fullURL, err), HTTPStatus: 502, Code: "upstream_error", Retryable: true}
+	}
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		c.maybeRecordRateLimit(resp.StatusCode, string(body), "Codebuff chat failed")
+		return nil, upstreamError(resp.StatusCode, body, resp.Header, "Codebuff chat failed")
+	}
+	return &ChatStream{Body: resp.Body, Header: resp.Header}, nil
+}
+
+// PumpChatStream reads SSE frames from an open chat stream.
+func PumpChatStream(body io.Reader, handle func(ChatEvent) error) error {
+	return scanSSE(body, handle)
 }
 
 // FetchAvailableModels discovers models from rateLimitsByModel.
@@ -654,12 +763,105 @@ func scanSSE(r io.Reader, handle func(ChatEvent) error) error {
 	return scanner.Err()
 }
 
-func upstreamError(status int, body []byte, prefix string) error {
+func upstreamError(status int, body []byte, headers http.Header, prefix string) error {
 	text := strings.TrimSpace(string(body))
 	if text == "" {
 		text = http.StatusText(status)
 	}
-	return &Error{Message: fmt.Sprintf("%s: %d %s", prefix, status, truncate(text, 500)), StatusCode: status}
+	err := &Error{
+		Message:    fmt.Sprintf("%s: %d %s", prefix, status, truncate(text, 500)),
+		HTTPStatus: status,
+		Code:       "upstream_error",
+		Retryable:  status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status >= 500,
+	}
+	if status == http.StatusTooManyRequests {
+		if ra := parseRetryAfterHeader(headers); ra != nil {
+			err.retryAfter = ra
+		} else if d := retryAfterFromRateLimitBody(body); d != nil {
+			err.retryAfter = d
+		} else if isQuotaExhaustedBody(body) {
+			// Permanent-ish free-tier / quota window; cool long enough to stop hammering.
+			cool := 30 * time.Minute
+			err.retryAfter = &cool
+		}
+	}
+	// 401/403: short cool-down so multi-token pools can rotate.
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		cool := 5 * time.Minute
+		err.retryAfter = &cool
+	}
+	return err
+}
+
+func parseRetryAfterHeader(headers http.Header) *time.Duration {
+	if headers == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(headers.Get("Retry-After"))
+	if raw == "" {
+		return nil
+	}
+	if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+		d := time.Duration(secs) * time.Second
+		return &d
+	}
+	if t, err := http.ParseTime(raw); err == nil {
+		d := time.Until(t)
+		if d > 0 {
+			return &d
+		}
+	}
+	return nil
+}
+
+// retryAfterFromRateLimitBody parses Freebuff/Codebuff 429 JSON:
+//
+//	{"model":"...","resetAt":"...","retryAfterMs":...}
+func retryAfterFromRateLimitBody(body []byte) *time.Duration {
+	if len(body) == 0 {
+		return nil
+	}
+	var data map[string]any
+	if json.Unmarshal(body, &data) != nil {
+		return nil
+	}
+	if resetAt := parseRateLimitReset(data["resetAt"]); !resetAt.IsZero() {
+		d := time.Until(resetAt)
+		if d < time.Second {
+			d = time.Second
+		}
+		return &d
+	}
+	switch v := data["retryAfterMs"].(type) {
+	case float64:
+		if v > 0 {
+			d := time.Duration(v) * time.Millisecond
+			return &d
+		}
+	case int:
+		if v > 0 {
+			d := time.Duration(v) * time.Millisecond
+			return &d
+		}
+	}
+	return nil
+}
+
+func isQuotaExhaustedBody(body []byte) bool {
+	s := string(body)
+	if s == "" {
+		return false
+	}
+	// Freebuff/Codebuff free-tier and CodeBuddy-style messages.
+	if strings.Contains(s, "14018") || strings.Contains(s, "额度已用尽") {
+		return true
+	}
+	lower := strings.ToLower(s)
+	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "ratelimit") {
+		return true
+	}
+	return strings.Contains(lower, "quota") &&
+		(strings.Contains(lower, "exhaust") || strings.Contains(lower, "exceed") || strings.Contains(lower, "insufficient") || strings.Contains(lower, "limit"))
 }
 
 func parseRateLimitReset(v any) time.Time {

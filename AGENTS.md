@@ -75,7 +75,8 @@ Write-through to host: `Metadata`/`Attributes` get `disabled`, `excluded_models`
 3. Multi-token pool; strip non-function tools.  
 4. Never set manual `Accept-Encoding: gzip` (breaks JSON with `\x1f`).  
 5. Chat-completions executor only.  
-6. Credential disable / model exclude / aliases follow workbuddy-cli-proxy.
+6. Credential disable / model exclude / aliases follow workbuddy-cli-proxy.  
+7. Upstream 4xx/429 must set error envelope `http_status` (+ RetryAfter when known) so CPA MarkResult cools/rotates auths; async stream connects before returning on execute_stream.
 
 ## Release
 
